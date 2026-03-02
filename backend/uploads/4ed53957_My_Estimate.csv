@@ -1,0 +1,14 @@
+﻿Résumé de l'estimation
+Coût initial,Coût mensuel,Total 12 months cost,Devise
+0,69.57,834.84,USD
+,,* Inclut le coût initial
+
+
+Estimation détaillée
+Hiérarchie du groupe,Région,Description,Service,Frais initiaux,Frais mensuels,First 12 months total,Devise,Statut,Récapitulatif de configuration
+My Estimate,USA Est (Virginie du Nord),,Amazon RDS for MariaDB,0,69.57,834.84,USD,,"Quantité de stockage (20 Go), Nœuds (1), Type d’instance (db.t3.micro), Utilisation (à la demande uniquement) (100 %Utilized/Month), Sélection de déploiement (Multi-AZ), Modèle de tarification (OnDemand), Volume de stockage (SSD à usage général (gp2))"
+
+
+
+Accusé de réception
+"* AWS Pricing Calculator fournit seulement une estimation de vos frais AWS et n'inclut pas toutes les taxes qui peuvent s'appliquer. Les frais réels dépendent de divers facteurs, et notamment de votre utilisation réelle des services AWS."
