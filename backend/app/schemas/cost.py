@@ -11,6 +11,7 @@ class CostRecord(Base, TimeStampMixin):
     cost_date = Column(Date, nullable=False, index=True)
     amount = Column(Float, nullable=False)
     currency = Column(String(3), default="EUR")
+    tva_rate = Column(Float, nullable=True, default=None)
     
     project_id = Column(String(100), index=True)
     team_id = Column(String(100), index=True)

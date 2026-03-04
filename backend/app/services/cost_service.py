@@ -125,10 +125,13 @@ class CostService:
 
     @staticmethod
     def get_total_cost(db: Session, start_date=None, end_date=None):
-        """✅ FIX : retourne un dict {total, currency, count}"""
+        """Retourne un dict {total_ht, tva_amount, total_ttc, currency, count}"""
         query = db.query(
             func.sum(CostRecord.amount).label("total"),
-            func.count(CostRecord.id).label("count")
+            func.count(CostRecord.id).label("count"),
+            func.sum(
+                func.coalesce(CostRecord.amount * CostRecord.tva_rate, 0)
+            ).label("tva_total"),
         )
         if start_date:
             query = query.filter(CostRecord.cost_date >= start_date)
@@ -136,10 +139,16 @@ class CostService:
             query = query.filter(CostRecord.cost_date <= end_date)
 
         result = query.first()
+        total_ht = float(result.total or 0)
+        tva_amount = round(float(result.tva_total or 0), 2)
+
         return {
-            "total":    float(result.total or 0),
-            "count":    result.count or 0,
-            "currency": "EUR",
+            "total":      total_ht,
+            "total_ht":   total_ht,
+            "tva_amount": tva_amount,
+            "total_ttc":  round(total_ht + tva_amount, 2),
+            "count":      result.count or 0,
+            "currency":   "EUR",
         }
 
 

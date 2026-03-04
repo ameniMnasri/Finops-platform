@@ -1,15 +1,39 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from typing import Optional, List
 from datetime import date, datetime
 
+
+class TvaMixin(BaseModel):
+    """Computed TVA fields shared across response models."""
+    amount: float
+    tva_rate: Optional[float] = None
+
+    @computed_field
+    @property
+    def tva_amount(self) -> Optional[float]:
+        """Montant de la TVA calculé à partir du taux"""
+        if self.tva_rate is not None:
+            return round(self.amount * self.tva_rate, 2)
+        return None
+
+    @computed_field
+    @property
+    def amount_ttc(self) -> Optional[float]:
+        """Montant TTC (HT + TVA)"""
+        if self.tva_rate is not None:
+            return round(self.amount * (1 + self.tva_rate), 2)
+        return None
+
+
 class CostBase(BaseModel):
     cost_date: date = Field(..., description="Date du coût")
-    amount: float = Field(..., gt=0, description="Montant du coût")
+    amount: float = Field(..., gt=0, description="Montant HT du coût")
     currency: str = Field(default="EUR", description="Devise (EUR, USD, etc.)")
     service_name: str = Field(..., description="Nom du service (EC2, RDS, S3, etc.)")
     project_id: Optional[str] = Field(None, description="ID du projet")
     team_id: Optional[str] = Field(None, description="ID de l'équipe")
     cost_category: Optional[str] = Field(None, description="Catégorie (Compute, Storage, etc.)")
+    tva_rate: Optional[float] = Field(None, description="Taux de TVA (ex: 0.20 pour 20%)")
 
 class CostCreate(CostBase):
     """Créer un coût"""
@@ -24,18 +48,19 @@ class CostUpdate(BaseModel):
     project_id: Optional[str] = None
     team_id: Optional[str] = None
     cost_category: Optional[str] = None
+    tva_rate: Optional[float] = None
 
-class CostResponse(CostBase):
+class CostResponse(TvaMixin, CostBase):
     """Réponse avec détails"""
     id: int
     file_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
-class CostListResponse(BaseModel):
+class CostListResponse(TvaMixin, BaseModel):
     """Coût dans une liste"""
     id: int
     cost_date: date
@@ -44,7 +69,8 @@ class CostListResponse(BaseModel):
     currency: str
     project_id: Optional[str] = None
     team_id: Optional[str] = None
-    
+    tva_rate: Optional[float] = None
+
     class Config:
         from_attributes = True
 

@@ -127,6 +127,7 @@ class FileParser:
             records.append({
                 'service_name': service_name,
                 'amount': amount_str,
+                'tva_rate': 0.20,
             })
 
         return records
@@ -219,6 +220,15 @@ class FileParser:
                 ])
                 cost_category = str(category)[:100] if category else None
 
+                # ── TVA ──────────────────────────────────────────────
+                tva_rate_val = self._map_column(record, ['tva_rate'])
+                tva_rate = None
+                if tva_rate_val is not None:
+                    try:
+                        tva_rate = float(tva_rate_val)
+                    except (ValueError, TypeError):
+                        tva_rate = None
+
                 cost_records.append({
                     'amount':        amount,
                     'service_name':  service,
@@ -227,6 +237,7 @@ class FileParser:
                     'project_id':    project_id,
                     'team_id':       team_id,
                     'cost_category': cost_category,
+                    'tva_rate':      tva_rate,
                 })
 
             except Exception as e:
@@ -331,6 +342,7 @@ class FileParser:
                     project_id=    data.get('project_id'),
                     team_id=       data.get('team_id'),
                     cost_category= data.get('cost_category'),
+                    tva_rate=      data.get('tva_rate'),
                     file_id=       db_file.id,
                 )
                 db.add(cost)
