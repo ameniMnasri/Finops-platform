@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FinOps Platform – Tableau de bord</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<!-- ── Navbar ──────────────────────────────────────────────────────────────── -->
+<nav class="navbar">
+    <h1>💰 FinOps Platform</h1>
+    <div class="navbar-right">
+        <span id="userEmail"></span>
+        <button id="refreshBtn">🔄 Actualiser</button>
+        <button id="logoutBtn">Déconnexion</button>
+    </div>
+</nav>
+
+<!-- ── Stats banner ────────────────────────────────────────────────────────── -->
+<div class="stats-banner">
+    <div class="stat-card">
+        <div class="label">Montant HT total</div>
+        <div class="value" id="statHT">…</div>
+    </div>
+    <div class="stat-card tva">
+        <div class="label">TVA totale</div>
+        <div class="value" id="statTVA">…</div>
+    </div>
+    <div class="stat-card tva">
+        <div class="label">Montant TTC total</div>
+        <div class="value" id="statTTC">…</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Nombre de coûts</div>
+        <div class="value" id="statCount">…</div>
+    </div>
+</div>
+
+<!-- ── Main content ─────────────────────────────────────────────────────────── -->
+<main class="main">
+
+    <!-- Toolbar: filters + add button -->
+    <div class="toolbar">
+        <input  type="text"   id="fService" placeholder="🔍 Service…" />
+        <input  type="text"   id="fProject" placeholder="🏷️ Projet…"  />
+        <input  type="date"   id="fStart"   title="Date début" />
+        <input  type="date"   id="fEnd"     title="Date fin"   />
+        <button class="btn btn-secondary" id="filterBtn">Filtrer</button>
+        <button class="btn btn-secondary" id="resetFilterBtn">Réinitialiser</button>
+        <span class="spacer"></span>
+        <span id="costsStatus"></span>
+        <button class="btn btn-primary"   id="openAddBtn">+ Ajouter un coût</button>
+    </div>
+
+    <!-- Costs table -->
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Date</th>
+                    <th>Service</th>
+                    <th>Montant HT</th>
+                    <th class="tva-header">Taux TVA</th>
+                    <th class="tva-header">Montant TVA</th>
+                    <th class="tva-header">Total TTC</th>
+                    <th>Projet</th>
+                    <th>Équipe</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="costsBody">
+                <tr><td colspan="10" class="loading">Chargement…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</main>
+
+<!-- ── Add / Edit modal ──────────────────────────────────────────────────────── -->
+<div class="modal-backdrop" id="costModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="modal-header">
+            <h2 id="modalTitle">Ajouter un coût</h2>
+            <button id="closeModal" aria-label="Fermer">&times;</button>
+        </div>
+
+        <form id="costForm" novalidate>
+            <!-- Hidden ID for edits -->
+            <input type="hidden" id="costId">
+
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="costDate">Date *</label>
+                    <input type="date" id="costDate" required>
+                </div>
+                <div class="form-group">
+                    <label for="costService">Service *</label>
+                    <input type="text" id="costService" required placeholder="EC2, S3, RDS…">
+                </div>
+
+                <div class="form-group">
+                    <label for="costAmount">Montant HT (€) *</label>
+                    <input type="number" id="costAmount" required step="0.01" min="0.01" placeholder="0.00">
+                </div>
+                <div class="form-group">
+                    <label for="costCurrency">Devise</label>
+                    <select id="costCurrency">
+                        <option value="EUR">EUR</option>
+                        <option value="USD">USD</option>
+                        <option value="GBP">GBP</option>
+                    </select>
+                </div>
+
+                <!-- TVA field – highlighted -->
+                <div class="form-group tva-field full">
+                    <label for="costTvaRate">🧾 Taux de TVA (%)</label>
+                    <input type="number" id="costTvaRate" step="0.01" min="0" max="100"
+                           placeholder="Ex : 20  (laisser vide si non applicable)">
+                    <span class="tva-hint">Entrez le pourcentage (ex : 20 pour 20 %).
+                        Le montant TVA et le total TTC seront calculés automatiquement.</span>
+                </div>
+
+                <div class="form-group">
+                    <label for="costProject">Projet</label>
+                    <input type="text" id="costProject" placeholder="projet-prod">
+                </div>
+                <div class="form-group">
+                    <label for="costTeam">Équipe</label>
+                    <input type="text" id="costTeam" placeholder="team-backend">
+                </div>
+
+                <div class="form-group full">
+                    <label for="costCategory">Catégorie</label>
+                    <input type="text" id="costCategory" placeholder="Compute, Storage, Network…">
+                </div>
+
+                <p class="form-error" id="formError"></p>
+            </div>
+
+            <div class="form-actions">
+                <button type="button"  class="btn btn-secondary" id="cancelBtn">Annuler</button>
+                <button type="submit"  class="btn btn-primary"   id="submitBtn">Enregistrer</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script src="js/api.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/costs.js"></script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FinOps Platform – Connexion</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div class="login-page">
+    <div class="login-card">
+        <h1>💰 FinOps Platform</h1>
+        <p class="subtitle">Gestion des coûts cloud</p>
+
+        <div class="login-tabs">
+            <button class="login-tab active" id="tabLogin"    onclick="showTab('login')">Connexion</button>
+            <button class="login-tab"        id="tabRegister" onclick="showTab('register')">Inscription</button>
+        </div>
+
+        <!-- Login form -->
+        <form id="loginForm" onsubmit="handleLoginForm(event)">
+            <div class="form-group">
+                <label for="email">Adresse e-mail</label>
+                <input type="email" id="email" name="email" required placeholder="vous@exemple.com" autocomplete="email">
+            </div>
+            <div class="form-group">
+                <label for="password">Mot de passe</label>
+                <input type="password" id="password" name="password" required placeholder="••••••••" autocomplete="current-password">
+            </div>
+            <p id="loginError" class="login-error"></p>
+            <button type="submit" id="loginBtn" class="btn-submit">Se connecter</button>
+        </form>
+
+        <!-- Register form (hidden by default) -->
+        <form id="registerForm" style="display:none" onsubmit="handleRegisterForm(event)">
+            <div class="form-group">
+                <label for="regName">Nom complet</label>
+                <input type="text" id="regName" name="full_name" required placeholder="Jean Dupont">
+            </div>
+            <div class="form-group">
+                <label for="regEmail">Adresse e-mail</label>
+                <input type="email" id="regEmail" name="email" required placeholder="vous@exemple.com" autocomplete="email">
+            </div>
+            <div class="form-group">
+                <label for="regPassword">Mot de passe</label>
+                <input type="password" id="regPassword" name="password" required placeholder="••••••••" autocomplete="new-password">
+            </div>
+            <p id="registerError" class="login-error"></p>
+            <button type="submit" id="registerBtn" class="btn-submit">Créer un compte</button>
+        </form>
+    </div>
+</div>
+
+<script src="js/api.js"></script>
+<script src="js/auth.js"></script>
+<script>
+    // Redirect to dashboard if already logged in
+    if (localStorage.getItem('access_token')) {
+        window.location.href = 'dashboard.html';
+    }
+
+    function showTab(tab) {
+        const isLogin = tab === 'login';
+        document.getElementById('loginForm').style.display    = isLogin ? '' : 'none';
+        document.getElementById('registerForm').style.display = isLogin ? 'none' : '';
+        document.getElementById('tabLogin').classList.toggle('active', isLogin);
+        document.getElementById('tabRegister').classList.toggle('active', !isLogin);
+    }
+</script>
+</body>
+</html>
