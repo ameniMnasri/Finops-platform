@@ -46,9 +46,96 @@ class FileParser:
             logger.error(f"❌ CSV error: {e}")
             raise
 
+    def _is_ovh_parasite_table(self, table: List) -> bool:
+        """Returns True if this table is a summary/total table, not a service list."""
+        real_rows = [r for r in table if any(str(c or '').strip() for c in r)]
+        if len(real_rows) <= 4:
+            for row in real_rows:
+                cells = [str(c or '').strip().lower() for c in row if str(c or '').strip()]
+                joined = ' '.join(cells)
+                if any(kw in joined for kw in ['prix ht', 'total ttc', 'tva (', 'abonnement']):
+                    non_empty = [c for c in row if str(c or '').strip()]
+                    if len(non_empty) <= 2:
+                        return True
+        return False
+
+    def _clean_ovh_service_name(self, name: str) -> str:
+        """Clean OVH service name by removing date ranges and engagement text."""
+        import re
+        # Remove date ranges like (01/01/2026-31/01/2026)
+        name = re.sub(r'\(\d{2}/\d{2}/\d{4}-\d{2}/\d{2}/\d{4}\)', '', name)
+        # Remove engagement text
+        name = re.sub(r"Sans engagement", '', name, flags=re.IGNORECASE)
+        name = re.sub(r"Date de fin d'engagement\s*:\s*\d{2}/\d{2}/\d{4}", '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\(only applicable for \d+ times\)', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'au prorata\s*:\s*\d+ jours', '', name, flags=re.IGNORECASE)
+        # Collapse whitespace / newlines
+        name = re.sub(r'\s+', ' ', name).strip()
+        return name
+
+    def _parse_ovh_pdf(self, file_path: Path) -> List[Dict[str, Any]]:
+        """Parse OVH invoice PDF, skipping parasite/summary tables."""
+        import pdfplumber
+        records = []
+        skip_cell0 = {'sous total', 'abonnement', 'rubrique'}
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                for table in (page.extract_tables() or []):
+                    if self._is_ovh_parasite_table(table):
+                        logger.debug("Skipping OVH parasite table")
+                        continue
+                    for row in table:
+                        # Skip fully empty rows
+                        if not any(str(c or '').strip() for c in row):
+                            continue
+                        cell0 = str(row[0] or '').strip()
+                        cell0_lower = cell0.lower()
+                        # Skip header / section / footer rows
+                        if cell0_lower in skip_cell0:
+                            continue
+                        if cell0_lower.startswith('rubrique'):
+                            continue
+                        if 'ovh - 2 rue kellermann' in cell0_lower:
+                            continue
+                        if 'facture' in cell0_lower and 'page' in cell0_lower:
+                            continue
+                        # Find last non-None numeric cell (Prix HT)
+                        amount_str = None
+                        for cell in reversed(row):
+                            val = str(cell or '').strip()
+                            if val and val != 'None':
+                                amount_str = val
+                                break
+                        if amount_str is None:
+                            continue
+                        service_name = self._clean_ovh_service_name(cell0)
+                        if not service_name:
+                            continue
+                        records.append({
+                            'service_name': service_name,
+                            'prix_ht': amount_str,
+                        })
+        logger.info(f"✅ OVH PDF parsed: {len(records)} rows")
+        return records
+
+    def _is_ovh_invoice(self, file_path: Path) -> bool:
+        """Detect whether a PDF is an OVH invoice."""
+        try:
+            import pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                if pdf.pages:
+                    text = pdf.pages[0].extract_text() or ''
+                    return 'ovh' in text.lower() or 'kellermann' in text.lower()
+        except Exception:
+            pass
+        return False
+
     def parse_pdf(self, file_path: Path) -> List[Dict[str, Any]]:
         try:
             import pdfplumber
+            if self._is_ovh_invoice(file_path):
+                logger.info("Detected OVH invoice PDF, using OVH-specific parser")
+                return self._parse_ovh_pdf(file_path)
             records = []
             with pdfplumber.open(file_path) as pdf:
                 for page in pdf.pages:
@@ -96,7 +183,7 @@ class FileParser:
                 amount_val = self._map_column(record, [
                     'amount', 'montant', 'cost', 'coût', 'cout', 'price', 'prix',
                     'total', 'total_amount', 'value', 'valeur', 'charge', 'frais',
-                    'blended_cost', 'unblended_cost', 'net_cost',
+                    'blended_cost', 'unblended_cost', 'net_cost', 'prix_ht',
                 ])
                 if amount_val is None:
                     continue

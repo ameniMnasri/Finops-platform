@@ -7,6 +7,7 @@ from typing import List
 
 from app.database import get_db
 from app.schemas.file import File as FileModel, FileStatus, FileFormat
+from app.schemas.cost import CostRecord
 from app.schemas.user import User
 from app.models.file import FileUploadResponse, FileListResponse, FileDetailResponse
 from app.services.file_parser import file_parser
@@ -130,6 +131,11 @@ def parse_file(
         raise HTTPException(status_code=404, detail="Fichier non trouvé")
 
     try:
+        # Delete old costs before re-parsing to prevent accumulation
+        deleted = db.query(CostRecord).filter(CostRecord.file_id == file_id).delete(synchronize_session='fetch')
+        db.commit()
+        logger.info(f"Deleted {deleted} old cost records for file {file_id}")
+
         # ✅ CORRECT : PARSING (pas PROCESSING)
         db_file.parse_status = FileStatus.PARSING
         db.commit()
