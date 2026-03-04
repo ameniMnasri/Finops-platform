@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 
 from app.config import settings
-from app.database import init_db, check_db_connection
+from app.database import init_db, run_migrations, check_db_connection
 from app.api.v1.api import api_router
 
 # Setup logging
@@ -39,6 +39,7 @@ def startup_event():
     # Initialize database
     try:
         init_db()
+        run_migrations()
         logger.info("✅ Startup complete!")
     except Exception as e:
         logger.error(f"❌ Startup error: {e}")

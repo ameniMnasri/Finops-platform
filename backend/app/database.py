@@ -40,6 +40,26 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     logger.info("✅ Database initialized")
 
+def run_migrations():
+    """Apply incremental schema changes that create_all cannot handle.
+
+    Every statement must be idempotent (use IF NOT EXISTS / IF EXISTS) so it is
+    safe to re-run on every startup.  When the list grows, consider replacing
+    this with Alembic and a tracked schema-version table.
+    """
+    migrations = [
+        # Added tva_rate column to support VAT tracking (tva_rate may not exist on
+        # databases created before this column was introduced)
+        "ALTER TABLE cost_records ADD COLUMN IF NOT EXISTS tva_rate FLOAT DEFAULT NULL",
+    ]
+    try:
+        with engine.begin() as conn:
+            for stmt in migrations:
+                conn.execute(text(stmt))
+        logger.info("✅ Migrations applied")
+    except Exception as e:
+        logger.warning(f"⚠️ Migration warning (non-fatal) for statement '{stmt}': {e}")
+
 def check_db_connection():
     """Check database connection"""
     try:
