@@ -51,17 +51,85 @@ class FileParser:
             import pdfplumber
             records = []
             with pdfplumber.open(file_path) as pdf:
+                # Detect OVH invoice by filename or first-page content
+                filename_lower = file_path.name.lower()
+                first_page_text = (pdf.pages[0].extract_text() or '') if pdf.pages else ''
+                is_ovh = (
+                    filename_lower.startswith('facture_fr')
+                    or 'ovh' in first_page_text.lower()
+                )
+                skipped = 0
                 for page in pdf.pages:
                     for table in (page.extract_tables() or []):
-                        if len(table) > 1:
+                        if is_ovh:
+                            if self._is_parasite_table(table):
+                                skipped += sum(1 for r in table if any(c for c in r if c))
+                                continue
+                            records.extend(self._parse_ovh_table(table))
+                        elif len(table) > 1:
                             headers = [str(h).lower().replace(" ", "_") for h in table[0]]
                             for row in table[1:]:
                                 records.append(dict(zip(headers, row)))
-            logger.info(f"✅ PDF parsed: {len(records)} rows")
+                if is_ovh:
+                    logger.info(f"✅ OVH PDF parsed: {len(records)} rows, {skipped} parasite rows skipped")
+                else:
+                    logger.info(f"✅ PDF parsed: {len(records)} rows")
             return records
         except Exception as e:
             logger.error(f"❌ PDF error: {e}")
             return []
+
+    def _is_parasite_table(self, table) -> bool:
+        """Detect OVH summary/total tables that should NOT be parsed as services."""
+        if not table:
+            return True
+        real_rows = [r for r in table if any(c for c in r if c and str(c).strip())]
+        if not real_rows:
+            return True
+
+        # Count non-None columns in first real row
+        num_cols = sum(1 for c in real_rows[0] if c is not None)
+
+        # Summary tables have exactly 2 columns and ≤ 4 rows
+        if num_cols == 2 and len(real_rows) <= 4:
+            for row in real_rows:
+                cells = [str(c or '').strip().lower() for c in row if c is not None]
+                joined = ' '.join(cells)
+                if any(kw in joined for kw in [
+                    'prix ht', 'total ttc', 'tva', 'total de la facture',
+                    'abonnement', 'sous total',
+                ]):
+                    return True
+
+        return False
+
+    def _parse_ovh_table(self, table) -> List[Dict[str, Any]]:
+        """Parse a single OVH service table, skipping header and subtotal rows."""
+        records = []
+        if not table or len(table) < 2:
+            return records
+
+        for row in table[1:]:  # skip header row
+            cells = [str(c or '').strip() for c in row]
+            non_empty = [(i, c) for i, c in enumerate(cells) if c]
+            if len(non_empty) < 2:
+                continue
+
+            first_lower = non_empty[0][1].lower()
+
+            # Skip SOUS TOTAL rows - they are subtotals, not individual services
+            if first_lower.startswith('sous total') or first_lower.startswith('sous-total'):
+                continue
+
+            service_name = non_empty[0][1]
+            amount_str = non_empty[-1][1]
+
+            records.append({
+                'service_name': service_name,
+                'amount': amount_str,
+            })
+
+        return records
 
     def parse_file(self, file_path: Path, file_format: str) -> List[Dict[str, Any]]:
         fmt = file_format.lower().strip() if hasattr(file_format, 'lower') else str(file_format).lower()
@@ -243,6 +311,11 @@ class FileParser:
         # ── Extraire les données de coût ─────────────────────────────
         cost_data = self.extract_cost_data(raw_records)
         logger.info(f"💰 Extracted cost records: {len(cost_data)}")
+
+        # ── Supprimer les coûts existants pour ce fichier ───────────
+        deleted = db.query(CostRecord).filter(CostRecord.file_id == db_file.id).delete()
+        if deleted:
+            logger.info(f"🗑️ Deleted {deleted} existing cost records for file {db_file.id}")
 
         # ── Sauvegarder en DB ────────────────────────────────────────
         created = 0
