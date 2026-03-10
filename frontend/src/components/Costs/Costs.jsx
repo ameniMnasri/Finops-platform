@@ -15,6 +15,25 @@ const fmt2 = v => Number(v||0).toLocaleString('fr-FR', { minimumFractionDigits:2
 const fmt0 = v => Number(v||0).toLocaleString('fr-FR', { minimumFractionDigits:0, maximumFractionDigits:0 });
 const fmtDate = d => d ? new Date(d).toLocaleDateString('fr-FR', { day:'2-digit', month:'short', year:'numeric' }) : '—';
 
+// Extracts a short, human-readable service name from OVH (and other) invoice rows.
+function extractShortServiceName(name) {
+  if (!name) return '—';
+  let s = name
+    .replace(/\([^)]*\)/g, '')                                      // remove (dates/ranges)
+    .replace(/Date de fin d['']engagement\s*:?\s*[\d/]+/gi, '')     // remove engagement date
+    .replace(/Monthly fees?/gi, '')                                  // remove "Monthly fees"
+    .replace(/Sans engagement/gi, '')                               // remove "Sans engagement"
+    .replace(/^\[(EUROPE|CANADA|ASIA|US)\]\s*/i, '')                // remove [EUROPE] etc.
+    .replace(/rental for \d+ months?/gi, '')                        // remove rental mentions
+    .replace(/for 1 month/gi, '')
+    .replace(/au prorata\s*:?\s*\d+ jours?/gi, '')
+    .replace(/only applicable for \d+ times?/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return name.slice(0, 40);
+  return s.length > 42 ? s.slice(0, 40) + '…' : s;
+}
+
 // Source badge — affiche l'origine réelle de la donnée
 function SourceBadge({ source, sourceRef }) {
   const s = source || 'Manuel';
@@ -321,6 +340,7 @@ export default function Costs() {
                   <SortTh label="Projet"    field="project_id"    sort={sort} onSort={handleSort}/>
                   <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#64748b', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Équipe</th>
                   <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#64748b', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Catégorie</th>
+                  <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#64748b', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Référence</th>
                   <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#1B5E46', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Source</th>
                   <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#64748b', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Actions</th>
                 </tr>
@@ -344,7 +364,7 @@ export default function Costs() {
                             <div style={{ width:28, height:28, borderRadius:8, background:'#1B5E46'+'18', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, fontWeight:800, color:'#1B5E46', flexShrink:0 }}>
                               {(cost.service_name||'?').charAt(0).toUpperCase()}
                             </div>
-                            <span style={{ fontSize:13, fontWeight:600, color:'#0f172a' }}>{cost.service_name}</span>
+                            <span title={cost.service_name} style={{ fontSize:13, fontWeight:600, color:'#0f172a' }}>{extractShortServiceName(cost.service_name)}</span>
                           </div>
                         )}
                       </td>
@@ -390,6 +410,17 @@ export default function Costs() {
                       {/* CATÉGORIE */}
                       <td style={{ padding:'12px 16px', fontSize:12, color:'#374151' }}>
                         {cost.cost_category || <span style={{ color:'#cbd5e1' }}>—</span>}
+                      </td>
+
+                      {/* RÉFÉRENCE */}
+                      <td style={{ padding:'12px 16px' }}>
+                        {(cost.reference) ? (
+                          <code title={cost.reference} style={{ fontSize:11, color:'#4b5563', background:'#f3f4f6', padding:'2px 7px', borderRadius:5, fontFamily:'monospace', whiteSpace:'nowrap', display:'inline-block', maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', verticalAlign:'middle' }}>
+                            {cost.reference}
+                          </code>
+                        ) : (
+                          <span style={{ color:'#cbd5e1' }}>—</span>
+                        )}
                       </td>
 
                       {/* ✅ SOURCE */}
