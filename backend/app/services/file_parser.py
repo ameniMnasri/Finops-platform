@@ -88,7 +88,7 @@ class FileParser:
         try:
             df = pd.read_excel(file_path)
             df.columns = [str(c).lower().strip().replace(' ', '_') for c in df.columns]
-            logger.info(f'✅ Excel parsed: {len(df)} rows, cols: {list(df.columns)}records')
+            logger.info(f'✅ Excel parsed: {len(df)} rows, cols: {list(df.columns)} records')
             return df.to_dict('records')
         except Exception as e:
             logger.error(f'❌ Excel error: {e}')
@@ -107,7 +107,7 @@ class FileParser:
             if df is None:
                 return []
             df.columns = [str(c).lower().strip().replace(' ', '_') for c in df.columns]
-            logger.info(f'✅ CSV parsed: {len(df)} rows, cols: {list(df.columns)}records')
+            logger.info(f'✅ CSV parsed: {len(df)} rows, cols: {list(df.columns)} records')
             return df.to_dict('records')
         except Exception as e:
             logger.error(f'❌ CSV error: {e}')
@@ -333,7 +333,8 @@ class FileParser:
                 except (ValueError, TypeError):
                     continue
 
-                # Keep 0-amount rows (e.g. OS Linux, bandwidth)
+                # Exclude negative amounts (e.g. credits/refunds); keep zero-amount rows
+                # such as "OS Linux" (included free) or bandwidth allowances.
                 if amount < 0:
                     continue
 
@@ -403,6 +404,8 @@ class FileParser:
                     ref_str = str(ref_raw).strip()
                     if _is_valid_reference(ref_str):
                         source_ref = ref_str
+                    else:
+                        logger.debug(f'  ⚠️ Row {i}: non-empty reference discarded (failed validation): {ref_str!r}')
 
                 cost_records.append({
                     'amount':        amount,
