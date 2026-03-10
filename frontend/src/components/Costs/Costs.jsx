@@ -311,14 +311,15 @@ export default function Costs() {
           </div>
         ) : (
           <div style={{ overflowX:'auto' }}>
-            <table style={{ width:'100%', borderCollapse:'collapse', minWidth:900 }}>
+            <table style={{ width:'100%', borderCollapse:'collapse', minWidth:1000 }}>
               <thead>
                 <tr>
-                  <SortTh label="Service"   field="service_name"  sort={sort} onSort={handleSort}/>
-                  <SortTh label="Montant"   field="amount"        sort={sort} onSort={handleSort}/>
+                  <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#64748b', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Référence</th>
+                  <SortTh label="Abonnement" field="service_name"  sort={sort} onSort={handleSort}/>
+                  <SortTh label="Montant"    field="amount"        sort={sort} onSort={handleSort}/>
                   <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#64748b', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Devise</th>
-                  <SortTh label="Date"      field="cost_date"     sort={sort} onSort={handleSort}/>
-                  <SortTh label="Projet"    field="project_id"    sort={sort} onSort={handleSort}/>
+                  <SortTh label="Date"       field="cost_date"     sort={sort} onSort={handleSort}/>
+                  <SortTh label="Projet"     field="project_id"    sort={sort} onSort={handleSort}/>
                   <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#64748b', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Équipe</th>
                   <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#64748b', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Catégorie</th>
                   <th style={{ padding:'11px 16px', textAlign:'left', fontSize:11, fontWeight:800, color:'#1B5E46', textTransform:'uppercase', letterSpacing:'.06em', borderBottom:'1px solid #f1f5f9', background:'#f8fafc' }}>Source</th>
@@ -334,18 +335,21 @@ export default function Costs() {
                       onMouseEnter={e => { if(!isEdit) e.currentTarget.style.background='#fafbfc'; }}
                       onMouseLeave={e => { if(!isEdit) e.currentTarget.style.background='white'; }}
                     >
-                      {/* SERVICE */}
+                      {/* RÉFÉRENCE */}
+                      <td style={{ padding:'12px 16px' }}>
+                        {cost.reference
+                          ? <code style={{ fontSize:11, color:'#374151', background:'#f1f5f9', padding:'2px 6px', borderRadius:4, fontFamily:'monospace', wordBreak:'break-all' }}>{cost.reference}</code>
+                          : <span style={{ color:'#cbd5e1', fontSize:12 }}>—</span>
+                        }
+                      </td>
+
+                      {/* ABONNEMENT */}
                       <td style={{ padding:'12px 16px' }}>
                         {isEdit ? (
                           <input value={editData.service_name} onChange={e=>setEditData(d=>({...d,service_name:e.target.value}))}
                             style={{ padding:'6px 10px', borderRadius:8, border:'1.5px solid #1B5E46', fontSize:13, fontFamily:'inherit', width:110, outline:'none' }}/>
                         ) : (
-                          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                            <div style={{ width:28, height:28, borderRadius:8, background:'#1B5E46'+'18', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, fontWeight:800, color:'#1B5E46', flexShrink:0 }}>
-                              {(cost.service_name||'?').charAt(0).toUpperCase()}
-                            </div>
-                            <span style={{ fontSize:13, fontWeight:600, color:'#0f172a' }}>{cost.service_name}</span>
-                          </div>
+                          <span style={{ fontSize:13, fontWeight:600, color:'#0f172a' }}>{cost.service_name}</span>
                         )}
                       </td>
 
@@ -394,7 +398,7 @@ export default function Costs() {
 
                       {/* ✅ SOURCE */}
                       <td style={{ padding:'12px 16px' }}>
-                        <SourceBadge source={cost.source} sourceRef={cost.source_ref}/>
+                        <SourceBadge source={cost.source} sourceRef={cost.reference}/>
                       </td>
 
                       {/* ACTIONS */}
