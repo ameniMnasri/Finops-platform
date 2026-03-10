@@ -155,7 +155,7 @@ class FileParser:
                 or first_cell.startswith('Date')
                 or _date_re.match(first_cell)
             ):
-                ref_cell  = cells[1] if len(cells) > 1 else ''
+                ref_cell = cells[1] if len(cells) > 1 else ''
                 last_cell = cells[-1] if cells else ''
                 if not ref_cell and not re.search(r'\d', last_cell):
                     continue
@@ -234,7 +234,8 @@ class FileParser:
                 except (ValueError, TypeError):
                     continue
 
-                # Bug 1 fix: was `<= 0`, changed to `< 0` — keep 0 € rows
+                # Bug 1 fix: was `<= 0`, changed to `< 0` — keep 0 € rows (free
+                # services like "OS Linux Monthly fees" are real and must appear)
                 if amount < 0:
                     continue
 
