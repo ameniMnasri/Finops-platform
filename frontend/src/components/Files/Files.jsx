@@ -38,6 +38,8 @@ const API_PRESETS = [
       { label: 'Public Cloud Budget',   value: 'https://eu.api.ovh.com/1.0/cloud/project/{projectId}/bill'        },
       { label: 'Public Cloud Usage',    value: 'https://eu.api.ovh.com/1.0/cloud/project/{projectId}/usage/current' },
       { label: 'Consommation totale',   value: 'https://eu.api.ovh.com/1.0/me/consumption'                        },
+      { label: 'VPS (liste)',           value: 'https://eu.api.ovh.com/1.0/vps'                                    },
+      { label: 'Serveurs Dédiés',       value: 'https://eu.api.ovh.com/1.0/dedicated/server'                      },
     ],
     fields: [
       { key:'app_key',      label:'Application Key',    type:'text',     placeholder:'xxxxxxxxxxx',             hint:'Générer sur eu.api.ovh.com/createToken' },

@@ -7,3 +7,5 @@ backend/venv/
 backend/.venv/
 backend/uploads/
 .venv/
+*.db
+*.sqlite

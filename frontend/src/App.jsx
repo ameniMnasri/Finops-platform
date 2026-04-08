@@ -8,6 +8,7 @@ import Dashboard from './components/Dashboard/Dashboard';
 import Files from './components/Files/Files';
 import Costs from './components/Costs/Costs';
 import Settings from './pages/Settings';
+import ResourceDashboard from './pages/ResourceDashboard';
 import LoadingSpinner from './components/Common/LoadingSpinner';
 
 function ProtectedRoute({ children }) {
@@ -31,6 +32,7 @@ function AppRoutes() {
       <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/files" element={<ProtectedRoute><Files /></ProtectedRoute>} />
       <Route path="/costs" element={<ProtectedRoute><Costs /></ProtectedRoute>} />
+      <Route path="/resources" element={<ProtectedRoute><ResourceDashboard /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="/" element={<Navigate to={isAuthenticated ? '/dashboard' : '/login'} />} />
     </Routes>
