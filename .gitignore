@@ -1,28 +1,45 @@
-# Python
-__pycache__/
-*.pyc
+# Virtual Environment
+.venv/
 venv/
 backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# Environment
+# Environment variables
 .env
 backend/.env
 frontend/.env
+*.env.local
 
-# Node
+# Database
+finops.db
+*.sqlite3
+*.sqlite3-journal
+
+# Uploads (remove test files)
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Node.js
 node_modules/
 frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-# Build
+# Build outputs
 dist/
 build/
-
-# Logs
 *.log
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
