@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import distinct
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, date
+
+from pydantic import BaseModel
 
 from app.dependencies import get_db
 from app.models.resource import ResourceMetric
@@ -14,6 +16,7 @@ from app.schemas.resource import (
     ResourcePeakStats,
 )
 from app.services import resource_service
+from app.services.cloud_fetcher import OVHFetcher
 
 router = APIRouter(
     prefix="/resources",
@@ -36,6 +39,70 @@ def _parse_date(d: Optional[str], field: str) -> Optional[datetime]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid date format for '{field}'. Expected YYYY-MM-DD.",
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OVH METRIC IMPORT REQUEST SCHEMA
+# ─────────────────────────────────────────────────────────────────────────────
+
+class OVHImportRequest(BaseModel):
+    auth_fields: Dict[str, Any]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPORT OVH METRICS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/import-ovh-metrics",
+    summary="Import resource metrics from OVH (VPS + Dedicated servers)",
+    description=(
+        "Fetches CPU/RAM/Disk metrics for all VPS and Dedicated servers "
+        "using the provided OVH credentials, then stores a snapshot in the "
+        "ResourceMetric table."
+    ),
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+)
+def import_ovh_metrics(
+    data: OVHImportRequest,
+    db: Session = Depends(get_db),
+):
+    fetcher = OVHFetcher()
+    try:
+        raw_metrics = fetcher.fetch_resource_metrics(data.auth_fields)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"OVH API error: {exc}",
+        )
+
+    created = 0
+    errors: List[str] = []
+
+    for m in raw_metrics:
+        try:
+            metric_create = ResourceMetricCreate(
+                cpu_usage=m["cpu_usage"],
+                ram_usage=m["ram_usage"],
+                disk_usage=m["disk_usage"],
+                server_name=m.get("server_name"),
+            )
+            resource_service.create_resource_metric(db, metric_create)
+            created += 1
+        except Exception as exc:
+            errors.append(f"{m.get('server_name', '?')}: {exc}")
+
+    return {
+        "servers_found":   len(raw_metrics),
+        "metrics_created": created,
+        "errors":          errors,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

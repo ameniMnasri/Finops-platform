@@ -125,6 +125,173 @@ class OVHFetcher(BaseFetcher):
         except Exception as e:
             return {"success": False, "message": str(e), "records_found": 0}
 
+    # ── Resource-metrics helpers ──────────────────────────────────
+    def _extract_last_value(self, data: Any) -> Optional[float]:
+        """Extract the most recent numeric value from an OVH use/statistics response."""
+        if not isinstance(data, dict):
+            return None
+        values = data.get("values", [])
+        if not values:
+            return None
+        last = values[-1]
+        if isinstance(last, dict):
+            try:
+                return float(last.get("value") or 0)
+            except (TypeError, ValueError):
+                return None
+        try:
+            return float(last or 0)
+        except (TypeError, ValueError):
+            return None
+
+    def _normalize_cpu(self, raw: Optional[float]) -> float:
+        """Convert OVH CPU value to percentage (0-100).
+        OVH may return a fraction (0-1) or a percentage (0-100)."""
+        v = float(raw or 0)
+        if 0.0 <= v <= 1.0:
+            v = v * 100.0
+        return round(min(max(v, 0.0), 100.0), 2)
+
+    def fetch_resource_metrics(
+        self,
+        auth_fields: Dict,
+    ) -> List[Dict[str, Any]]:
+        """Fetch CPU/RAM/Disk metrics for all VPS and Dedicated servers.
+
+        Returns a list of normalized metric dicts compatible with
+        ``ResourceMetricCreate`` (keys: server_name, cpu_usage, ram_usage,
+        disk_usage).
+        """
+        app_key, app_secret, consumer_key = self._keys(auth_fields)
+        if not all([app_key, app_secret, consumer_key]):
+            raise ValueError(
+                "Application Key, Application Secret et Consumer Key requis"
+            )
+
+        metrics: List[Dict[str, Any]] = []
+
+        # ── VPS servers ───────────────────────────────────────────
+        try:
+            vps_list = self._request(
+                "GET", "/vps", app_key, app_secret, consumer_key
+            )
+            if not isinstance(vps_list, list):
+                vps_list = []
+            logger.info(f"OVH: found {len(vps_list)} VPS server(s)")
+
+            for vps_name in vps_list[:20]:
+                try:
+                    # CPU
+                    cpu_raw = self._extract_last_value(
+                        self._request(
+                            "GET", f"/vps/{vps_name}/use?type=cpu",
+                            app_key, app_secret, consumer_key,
+                        )
+                    )
+                    # RAM (bytes)
+                    mem_raw = self._extract_last_value(
+                        self._request(
+                            "GET", f"/vps/{vps_name}/use?type=mem",
+                            app_key, app_secret, consumer_key,
+                        )
+                    )
+                    # Disk size from VPS info (diskSize field, in GB)
+                    disk_gb = 0.0
+                    try:
+                        vps_info = self._request(
+                            "GET", f"/vps/{vps_name}",
+                            app_key, app_secret, consumer_key,
+                        )
+                        disk_gb = float(vps_info.get("diskSize") or 0)
+                    except Exception:
+                        pass
+
+                    cpu_pct = self._normalize_cpu(cpu_raw)
+                    ram_gb  = round(float(mem_raw or 0) / (1024.0 ** 3), 3)
+
+                    metrics.append({
+                        "server_name": vps_name,
+                        "cpu_usage":   cpu_pct,
+                        "ram_usage":   ram_gb,
+                        "disk_usage":  round(disk_gb, 3),
+                    })
+                    logger.info(
+                        f"✅ VPS {vps_name}: cpu={cpu_pct}% "
+                        f"ram={ram_gb}GB disk={disk_gb}GB"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"⚠️ Could not fetch metrics for VPS {vps_name}: {exc}"
+                    )
+        except Exception as exc:
+            logger.warning(f"⚠️ Could not fetch VPS list: {exc}")
+
+        # ── Dedicated servers ─────────────────────────────────────
+        try:
+            server_list = self._request(
+                "GET", "/dedicated/server", app_key, app_secret, consumer_key
+            )
+            if not isinstance(server_list, list):
+                server_list = []
+            logger.info(f"OVH: found {len(server_list)} dedicated server(s)")
+
+            for server_name in server_list[:20]:
+                try:
+                    cpu_raw = self._extract_last_value(
+                        self._request(
+                            "GET",
+                            f"/dedicated/server/{server_name}/statistics?type=cpu",
+                            app_key, app_secret, consumer_key,
+                        )
+                    )
+                    mem_raw = self._extract_last_value(
+                        self._request(
+                            "GET",
+                            f"/dedicated/server/{server_name}/statistics?type=ram",
+                            app_key, app_secret, consumer_key,
+                        )
+                    )
+                    # Disk usage (bytes)
+                    disk_raw = 0.0
+                    try:
+                        disk_raw = self._extract_last_value(
+                            self._request(
+                                "GET",
+                                f"/dedicated/server/{server_name}/statistics"
+                                f"?type=diskUsage:disk1",
+                                app_key, app_secret, consumer_key,
+                            )
+                        ) or 0.0
+                    except Exception:
+                        pass
+
+                    cpu_pct  = self._normalize_cpu(cpu_raw)
+                    ram_gb   = round(float(mem_raw  or 0) / (1024.0 ** 3), 3)
+                    disk_gb  = round(float(disk_raw or 0) / (1024.0 ** 3), 3)
+
+                    metrics.append({
+                        "server_name": server_name,
+                        "cpu_usage":   cpu_pct,
+                        "ram_usage":   ram_gb,
+                        "disk_usage":  disk_gb,
+                    })
+                    logger.info(
+                        f"✅ Dedicated {server_name}: cpu={cpu_pct}% "
+                        f"ram={ram_gb}GB disk={disk_gb}GB"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"⚠️ Could not fetch stats for dedicated server "
+                        f"{server_name}: {exc}"
+                    )
+        except Exception as exc:
+            logger.warning(f"⚠️ Could not fetch dedicated server list: {exc}")
+
+        logger.info(
+            f"✅ OVH resource metrics fetch done: {len(metrics)} server(s)"
+        )
+        return metrics
+
     def fetch_costs(
         self,
         auth_fields: Dict,
