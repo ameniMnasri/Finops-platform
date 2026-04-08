@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import distinct
 from typing import Any, Dict, List, Optional
 from datetime import datetime, date
+import logging
 
 from pydantic import BaseModel
 
@@ -17,6 +18,8 @@ from app.schemas.resource import (
 )
 from app.services import resource_service
 from app.services.cloud_fetcher import OVHFetcher
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/resources",
@@ -77,9 +80,10 @@ def import_ovh_metrics(
             detail=str(exc),
         )
     except Exception as exc:
+        logger.warning(f"OVH resource metrics fetch failed: {exc}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"OVH API error: {exc}",
+            detail="Failed to fetch resource metrics from OVH API",
         )
 
     created = 0
@@ -96,7 +100,9 @@ def import_ovh_metrics(
             resource_service.create_resource_metric(db, metric_create)
             created += 1
         except Exception as exc:
-            errors.append(f"{m.get('server_name', '?')}: {exc}")
+            server = m.get('server_name', '?')
+            logger.warning(f"Could not store metric for {server}: {exc}", exc_info=True)
+            errors.append(f"{server}: failed to store metric")
 
     return {
         "servers_found":   len(raw_metrics),
