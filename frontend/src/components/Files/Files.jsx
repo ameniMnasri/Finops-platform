@@ -276,16 +276,17 @@ function MiniChart({ data, metricKey, color, unit, label, threshold }) {
 }
 
 // ── The main inline resource panel ───────────────────────────────────
-function OVHResourcePanel() {
-  const [servers,       setServers]       = useState([]);
-  const [avgStats,      setAvgStats]      = useState(null);
-  const [loading,       setLoading]       = useState(true);
-  const [resTab,        setResTab]        = useState('table');   // table | charts | insights
-  const [selectedSrv,   setSelectedSrv]   = useState(null);
-  const [timeSeries,    setTimeSeries]    = useState([]);
-  const [loadingChart,  setLoadingChart]  = useState(false);
-  const [search,        setSearch]        = useState('');
-  const [statusFilter,  setStatusFilter]  = useState('all');
+function OVHResourcePanel({ authFields = {} }) {
+  const [servers,         setServers]         = useState([]);
+  const [avgStats,        setAvgStats]        = useState(null);
+  const [loading,         setLoading]         = useState(true);
+  const [resTab,          setResTab]          = useState('table');   // table | charts | insights
+  const [selectedSrv,     setSelectedSrv]     = useState(null);
+  const [timeSeries,      setTimeSeries]      = useState([]);
+  const [loadingChart,    setLoadingChart]    = useState(false);
+  const [search,          setSearch]          = useState('');
+  const [statusFilter,    setStatusFilter]    = useState('all');
+  const [importing,       setImporting]       = useState(false);
 
   // Load server summaries
   const loadServers = useCallback(async () => {
@@ -331,6 +332,36 @@ function OVHResourcePanel() {
       setLoadingChart(false);
     }
   }, []);
+
+  // Import OVH metrics via the new endpoint
+  const handleImportMetrics = async () => {
+    const hasKeys = authFields.app_key && authFields.app_secret && authFields.consumer_key;
+    if (!hasKeys) {
+      toast.error('Renseignez Application Key, Application Secret et Consumer Key avant d\'importer');
+      return;
+    }
+    setImporting(true);
+    try {
+      toast.loading('Collecte des métriques OVH…', { id: 'ovh-metrics' });
+      const res = await api.post('/resources/import-ovh-metrics', { auth_fields: authFields });
+      const { servers_found, metrics_created, errors } = res.data;
+      toast.success(
+        `✅ ${metrics_created} métrique(s) importée(s) pour ${servers_found} serveur(s)`,
+        { id: 'ovh-metrics', duration: 5000 },
+      );
+      if (errors?.length) {
+        errors.forEach(e => toast.error(e, { duration: 4000 }));
+      }
+      await loadServers();
+    } catch (e) {
+      toast.error(
+        'Erreur import métriques : ' + (e?.response?.data?.detail || e.message),
+        { id: 'ovh-metrics' },
+      );
+    } finally {
+      setImporting(false);
+    }
+  };
 
   useEffect(() => { loadServers(); }, []);
   useEffect(() => {
@@ -388,15 +419,29 @@ function OVHResourcePanel() {
             </p>
           </div>
         </div>
-        <button onClick={loadServers} style={{
-          display: 'flex', alignItems: 'center', gap: 5,
-          padding: '6px 14px', borderRadius: 8,
-          background: 'rgba(255,255,255,.15)', border: '1px solid rgba(255,255,255,.3)',
-          color: 'white', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
-        }}>
-          <RefreshCw size={12} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
-          Actualiser
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <button onClick={handleImportMetrics} disabled={importing} style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '6px 14px', borderRadius: 8,
+            background: importing ? 'rgba(255,255,255,.08)' : 'rgba(255,255,255,.25)',
+            border: '1px solid rgba(255,255,255,.4)',
+            color: 'white', fontSize: 11, fontWeight: 700,
+            cursor: importing ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+            opacity: importing ? 0.7 : 1,
+          }}>
+            <Cpu size={12} style={{ animation: importing ? 'spin 1s linear infinite' : 'none' }} />
+            {importing ? 'Import…' : 'Importer Métriques Ressources'}
+          </button>
+          <button onClick={loadServers} style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '6px 14px', borderRadius: 8,
+            background: 'rgba(255,255,255,.15)', border: '1px solid rgba(255,255,255,.3)',
+            color: 'white', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+          }}>
+            <RefreshCw size={12} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
+            Actualiser
+          </button>
+        </div>
       </div>
 
       {/* KPI strip */}
@@ -1386,7 +1431,7 @@ export default function Files() {
                     </div>
 
                     {/* ══ INLINE RESOURCE MONITORING PANEL ══ */}
-                    <OVHResourcePanel />
+                    <OVHResourcePanel authFields={apiFields} />
                   </>
                 )}
 
