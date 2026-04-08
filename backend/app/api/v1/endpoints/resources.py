@@ -30,14 +30,6 @@ router = APIRouter(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REQUEST SCHEMAS
-# ─────────────────────────────────────────────────────────────────────────────
-
-class OVHImportRequest(OVHCredentials):
-    """OVH credentials for the /resources/import-ovh endpoint."""
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -316,7 +308,7 @@ def get_all_servers_summary(
     ),
 )
 def import_ovh_resources(
-    payload: OVHImportRequest,
+    payload: OVHCredentials,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

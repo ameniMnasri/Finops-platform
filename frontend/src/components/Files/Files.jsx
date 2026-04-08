@@ -1445,7 +1445,11 @@ export default function Files() {
                           transition: 'all .15s',
                         }}
                       >
-                        <Server size={15} style={{ animation: importingRes ? 'spin 1s linear infinite' : 'none' }} />
+                        <Server
+                          size={15}
+                          aria-label={importingRes ? 'Import en cours' : 'Importer les ressources OVHcloud'}
+                          style={{ animation: importingRes ? 'spin 1s linear infinite' : 'none' }}
+                        />
                         {importingRes ? 'Import en cours…' : 'Importer les ressources OVHcloud'}
                       </button>
 

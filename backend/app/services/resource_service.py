@@ -44,7 +44,7 @@ def save_ovh_resource_metrics(
             if raw_ts:
                 try:
                     recorded_at = datetime.fromisoformat(raw_ts)
-                except Exception:
+                except (ValueError, TypeError):
                     recorded_at = datetime.utcnow()
 
             metric_data = ResourceMetricCreate(

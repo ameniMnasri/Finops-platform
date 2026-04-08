@@ -409,6 +409,12 @@ class OVHResourceFetcher:
 
     # ── Metric normalisation helpers ──────────────────────────────────
 
+    @staticmethod
+    def _avg_of_points(points: list) -> float:
+        """Average the 'value' field from a list of {timestamp, value} dicts."""
+        values = [float(p.get("value") or 0) for p in points if isinstance(p, dict)]
+        return sum(values) / len(values) if values else 0.0
+
     def _normalise_cpu(self, raw: Any) -> float:
         """Extract a CPU percentage (0-100) from various response shapes."""
         if raw is None:
@@ -419,8 +425,7 @@ class OVHResourceFetcher:
             return min(max(float(val or 0), 0.0), 100.0)
         # list of {timestamp, value} points → average
         if isinstance(raw, list) and raw:
-            values = [float(p.get("value") or 0) for p in raw if isinstance(p, dict)]
-            return min(max(sum(values) / len(values) if values else 0.0, 0.0), 100.0)
+            return min(max(self._avg_of_points(raw), 0.0), 100.0)
         try:
             return min(max(float(raw), 0.0), 100.0)
         except (TypeError, ValueError):
@@ -434,8 +439,7 @@ class OVHResourceFetcher:
         if isinstance(raw, dict):
             val = raw.get("memAvg") or raw.get("diskAvg") or raw.get("avg") or raw.get("value") or 0.0
         elif isinstance(raw, list) and raw:
-            values = [float(p.get("value") or 0) for p in raw if isinstance(p, dict)]
-            val = sum(values) / len(values) if values else 0.0
+            val = self._avg_of_points(raw)
         else:
             try:
                 val = float(raw)

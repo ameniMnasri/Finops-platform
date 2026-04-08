@@ -55,10 +55,6 @@ class FetchAndImportRequest(BaseModel):
     metadata:      Optional[Dict[str, Any]] = {}
 
 
-class OVHResourceImportRequest(OVHCredentials):
-    """OVH credentials for the /files/import-ovh-resources endpoint."""
-
-
 # ==================== LIST FILES ====================
 
 @router.get("/", response_model=List[FileListResponse])
@@ -387,7 +383,7 @@ def parse_file(
 
 @router.post("/import-ovh-resources", status_code=status.HTTP_201_CREATED)
 def import_ovh_resources(
-    payload:      OVHResourceImportRequest,
+    payload:      OVHCredentials,
     db:           Session = Depends(get_db),
     current_user: User    = Depends(get_current_user),
 ):
