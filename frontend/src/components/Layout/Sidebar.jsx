@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, DollarSign, FileText,
   Settings, LogOut, ChevronDown, ChevronUp,
-  BarChart2,
+  BarChart2,Server,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
@@ -34,9 +34,9 @@ export default function Sidebar() {
             background: 'linear-gradient(135deg, #4CAF50, #2A8659)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontWeight: 800, fontSize: 16, color: 'white', flexShrink: 0,
-          }}>T</div>
+          }}>TW</div>
           <div>
-            <h1>TeamWill</h1>
+            <h1>Teamwill</h1>
             <span>FinOps Platform</span>
           </div>
         </div>
@@ -66,6 +66,9 @@ export default function Sidebar() {
             <div style={{ marginLeft: 16, marginTop: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
               <NavLink to="/files" icon={FileText}    label="Fichiers"   />
               <NavLink to="/costs" icon={DollarSign}  label="Coûts"      />
+              <NavLink to="/Devis" icon={DollarSign}  label="Devis"      />
+              <NavLink to="/resources" icon={Server} label="Ressources" />
+
             </div>
           )}
         </div>

@@ -102,7 +102,7 @@ function VersionBadge() {
         fontSize: 22, fontWeight: 900,
       }}>T</div>
       <div>
-        <p style={{ fontWeight: 800, fontSize: 16 }}>TeamWill FinOps Platform</p>
+        <p style={{ fontWeight: 800, fontSize: 16 }}>Teamwill FinOps Platform</p>
         <p style={{ opacity: .75, fontSize: 12, marginTop: 2 }}>Version 1.0.0 — Build 2024.02</p>
       </div>
       <div style={{ marginLeft: 'auto' }}>
@@ -124,7 +124,7 @@ export default function Settings() {
   // Profil
   const [displayName, setDisplayName] = useState(user?.email?.split('@')[0] || '');
   const [email]                        = useState(user?.email || '');
-  const [company,     setCompany]      = useState('TeamWill Consulting');
+  const [company,     setCompany]      = useState('Teamwill Consulting');
   const [role,        setRole]         = useState('Administrateur');
 
   // Mot de passe

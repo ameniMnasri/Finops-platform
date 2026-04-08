@@ -7,6 +7,8 @@ const TITLES = {
   '/dashboard': { title: 'Dashboard',         sub: "Vue d'ensemble de vos coûts cloud" },
   '/files':     { title: 'Fichiers',           sub: 'Gérez vos fichiers de données'     },
   '/costs':     { title: 'Coûts',              sub: 'Gérez vos dépenses cloud'           },
+  '/Devis':     { title: 'Devis',              sub: 'Gérez vos devis'                    },
+  '/resources': { title: 'Ressources',         sub: 'Gérez vos ressources cloud'         },
   '/settings':  { title: 'Paramètres',         sub: "Configuration de l'application"    },
 };
 
