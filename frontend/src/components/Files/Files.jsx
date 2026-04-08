@@ -953,6 +953,8 @@ export default function Files() {
   const [importing,      setImporting]      = useState(false);
   const [testResult,     setTestResult]     = useState(null);
   const [importResult,   setImportResult]   = useState(null);
+  const [importingRes,   setImportingRes]   = useState(false);
+  const [importResResult,setImportResResult]= useState(null);
 
   const preset = API_PRESETS.find(p => p.id === selectedPreset);
 
@@ -1110,6 +1112,34 @@ export default function Files() {
       toast.error('Erreur: ' + (e?.response?.data?.detail || e.message), { id: 'api-import' });
     } finally {
       setImporting(false);
+    }
+  };
+
+  const handleImportOvhResources = async () => {
+    if (!apiFields.app_key || !apiFields.app_secret || !apiFields.consumer_key) {
+      toast.error('Application Key, Application Secret et Consumer Key requis');
+      return;
+    }
+    try {
+      setImportingRes(true); setImportResResult(null);
+      toast.loading('Import ressources OVH en cours...', { id: 'ovh-res-import' });
+      const res = await api.post('/files/import-ovh-resources', {
+        app_key:      apiFields.app_key,
+        app_secret:   apiFields.app_secret,
+        consumer_key: apiFields.consumer_key,
+      });
+      setImportResResult(res.data);
+      toast.success(
+        `✅ ${res.data.metrics_created} métrique(s) OVH importée(s) !`,
+        { id: 'ovh-res-import' },
+      );
+    } catch (e) {
+      toast.error(
+        'Erreur ressources OVH: ' + (e?.response?.data?.detail || e.message),
+        { id: 'ovh-res-import' },
+      );
+    } finally {
+      setImportingRes(false);
     }
   };
 
@@ -1387,6 +1417,62 @@ export default function Files() {
 
                     {/* ══ INLINE RESOURCE MONITORING PANEL ══ */}
                     <OVHResourcePanel />
+
+                    {/* ══ IMPORT RESOURCES BUTTON ══ */}
+                    <div style={{
+                      marginTop: 14, padding: '14px 16px',
+                      background: '#f0fdf4', border: '1.5px solid #86efac',
+                      borderRadius: 12,
+                    }}>
+                      <p style={{ fontSize: 12, fontWeight: 700, color: '#15803d', marginBottom: 8 }}>
+                        🖥️ Importer les métriques de vos serveurs (CPU / RAM / Disque)
+                      </p>
+                      <p style={{ fontSize: 11, color: '#166534', marginBottom: 12 }}>
+                        Récupère les données de monitoring de tous vos VPS et serveurs dédiés OVHcloud.
+                      </p>
+                      <button
+                        onClick={handleImportOvhResources}
+                        disabled={importingRes}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          padding: '10px 20px', borderRadius: 10,
+                          background: importingRes ? '#94a3b8' : '#15803d',
+                          color: 'white', border: 'none',
+                          fontWeight: 700, fontSize: 13,
+                          cursor: importingRes ? 'not-allowed' : 'pointer',
+                          fontFamily: 'inherit',
+                          boxShadow: importingRes ? 'none' : '0 4px 12px rgba(21,128,61,.3)',
+                          transition: 'all .15s',
+                        }}
+                      >
+                        <Server size={15} style={{ animation: importingRes ? 'spin 1s linear infinite' : 'none' }} />
+                        {importingRes ? 'Import en cours…' : 'Importer les ressources OVHcloud'}
+                      </button>
+
+                      {importResResult && (
+                        <div style={{
+                          marginTop: 12, padding: '10px 14px',
+                          background: 'white', borderRadius: 9,
+                          border: '1px solid #bbf7d0', fontSize: 12,
+                        }}>
+                          <p style={{ fontWeight: 700, color: '#15803d', marginBottom: 6 }}>
+                            ✅ {importResResult.message}
+                          </p>
+                          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                            <span style={{ color: '#374151' }}>Récupérés : <strong>{importResResult.total_fetched}</strong></span>
+                            <span style={{ color: '#16a34a' }}>Importés : <strong>{importResResult.metrics_created}</strong></span>
+                            {importResResult.metrics_skipped > 0 && (
+                              <span style={{ color: '#d97706' }}>Ignorés : <strong>{importResResult.metrics_skipped}</strong></span>
+                            )}
+                          </div>
+                          {importResResult.errors?.length > 0 && (
+                            <div style={{ marginTop: 6, color: '#dc2626', fontSize: 11 }}>
+                              {importResResult.errors.map((err, i) => <p key={i}>{err}</p>)}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </>
                 )}
 
