@@ -2,9 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import distinct
 from typing import Optional
-from datetime import datetime, date
+from datetime import datetime
 
-from app.dependencies import get_db
+import requests
+
+from app.dependencies import get_db, get_current_user
 from app.models.resource import ResourceMetric
 from app.schemas.resource import (
     ResourceMetricCreate,
@@ -13,7 +15,13 @@ from app.schemas.resource import (
     ResourceAverageStats,
     ResourcePeakStats,
 )
+from app.schemas.user import User
 from app.services import resource_service
+from app.services.cloud_fetcher import get_ovh_resource_fetcher
+from app.schemas.cloud import OVHCredentials
+
+import logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/resources",
@@ -284,3 +292,66 @@ def get_all_servers_summary(
         })
 
     return results
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OVHcloud DIRECT IMPORT  ← NEW
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/import-ovh",
+    status_code=status.HTTP_201_CREATED,
+    summary="Import OVHcloud VPS & Dedicated server metrics",
+    description=(
+        "Fetch CPU, RAM and Disk usage from all OVHcloud VPS and Dedicated "
+        "servers using HMAC-signed API requests, then store the metrics in "
+        "the ResourceMetric table.  Returns the count of records created."
+    ),
+)
+def import_ovh_resources(
+    payload: OVHCredentials,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    POST /resources/import-ovh
+    Accepts OVHcloud credentials and imports server metrics.
+    Requires a valid application user session.
+    """
+    logger.info(f"🌐 POST /resources/import-ovh by {current_user.email}")
+    try:
+        fetcher = get_ovh_resource_fetcher()
+        auth_fields = {
+            "app_key":      payload.app_key,
+            "app_secret":   payload.app_secret,
+            "consumer_key": payload.consumer_key,
+        }
+        raw_resources = fetcher.fetch_resources(auth_fields)
+        logger.info(f"📦 Fetched {len(raw_resources)} resource record(s) from OVHcloud")
+
+        result = resource_service.save_ovh_resource_metrics(db, raw_resources)
+        logger.info(
+            f"✅ import-ovh done: {result['metrics_created']} created, "
+            f"{result['metrics_skipped']} skipped"
+        )
+        return {
+            "message": (
+                f"Import OVHcloud réussi — "
+                f"{result['metrics_created']} métrique(s) enregistrée(s)"
+            ),
+            **result,
+        }
+
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else 502
+        if code == 403:
+            detail = "Accès refusé — vérifiez les permissions de votre Consumer Key (GET /vps, GET /dedicated/server)"
+        elif code == 401:
+            detail = "Clés OVHcloud invalides ou expirées"
+        else:
+            detail = f"Erreur API OVHcloud {code}"
+        raise HTTPException(status_code=502, detail=detail)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"❌ import-ovh error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Import OVHcloud failed — consultez les logs serveur")

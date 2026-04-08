@@ -22,6 +22,54 @@ def create_resource_metric(db: Session, data: ResourceMetricCreate) -> ResourceM
     return metric
 
 
+def save_ovh_resource_metrics(
+    db: Session,
+    raw_resources: List[dict],
+) -> dict:
+    """
+    Persist a list of raw OVHcloud resource records (as returned by
+    OVHResourceFetcher.fetch_resources) to the ResourceMetric table.
+
+    Returns a summary dict with keys:
+        metrics_created, metrics_skipped, errors, imported_at
+    """
+    metrics_created = 0
+    metrics_skipped = 0
+    errors: List[str] = []
+
+    for i, record in enumerate(raw_resources):
+        try:
+            recorded_at = None
+            raw_ts = record.get("recorded_at")
+            if raw_ts:
+                try:
+                    recorded_at = datetime.fromisoformat(raw_ts)
+                except (ValueError, TypeError):
+                    recorded_at = datetime.utcnow()
+
+            metric_data = ResourceMetricCreate(
+                cpu_usage   = float(record.get("cpu_usage",  0) or 0),
+                ram_usage   = float(record.get("ram_usage",  0) or 0),
+                disk_usage  = float(record.get("disk_usage", 0) or 0),
+                server_name = record.get("server_name"),
+                recorded_at = recorded_at,
+            )
+            create_resource_metric(db, metric_data)
+            metrics_created += 1
+
+        except Exception as e:
+            metrics_skipped += 1
+            errors.append(f"Record {i + 1} ({record.get('server_name', '?')}): {str(e)}")
+
+    return {
+        "metrics_created": metrics_created,
+        "metrics_skipped": metrics_skipped,
+        "total_fetched":   len(raw_resources),
+        "errors":          errors[:10],
+        "imported_at":     datetime.utcnow().isoformat(),
+    }
+
+
 def get_resource_metrics(
     db: Session,
     skip: int = 0,
