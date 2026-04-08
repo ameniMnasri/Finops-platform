@@ -5,7 +5,7 @@ import {
   ChevronDown, ChevronRight, Eye, EyeOff, DollarSign,
   TrendingUp, TrendingDown, Database, AlertCircle, Server,
   Cpu, HardDrive, MemoryStick, Activity, BarChart2,
-  Lightbulb,
+  Lightbulb, Search,
 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -14,6 +14,14 @@ import {
 import Layout from '../Layout/Layout';
 import { filesService } from '../../services/files';
 import { costsService } from '../../services/costs';
+import {
+  resourcesService,
+  buildServerList,
+  generateSummary,
+} from '../../services/resource.service';
+import ServerTable from '../Resources/ServerTable';
+import ResourceChart from '../Resources/ResourceChart';
+import Insights from '../Resources/Insights';
 import api from '../../services/api';
 import toast from 'react-hot-toast';
 
@@ -956,6 +964,89 @@ export default function Files() {
 
   const preset = API_PRESETS.find(p => p.id === selectedPreset);
 
+  // ── Resources tab state ────────────────────────────────────────────
+  const [resServers,       setResServers]       = useState([]);
+  const [resSelectedSrv,   setResSelectedSrv]   = useState(null);
+  const [resTimeSeries,    setResTimeSeries]     = useState([]);
+  const [resLoading,       setResLoading]        = useState(false);
+  const [resChartLoading,  setResChartLoading]   = useState(false);
+  const [resSubTab,        setResSubTab]         = useState('servers');
+  const [resSearch,        setResSearch]         = useState('');
+  const [resTypeFilter,    setResTypeFilter]     = useState('all');
+  const [resStatusFilter,  setResStatusFilter]   = useState('all');
+  const resTimeSeriesCache = useRef({});
+
+  const loadResources = useCallback(async () => {
+    setResLoading(true);
+    try {
+      const [costsResult, summariesResult] = await Promise.allSettled([
+        costsService.getCosts(0, 5000),
+        resourcesService.getAllServersSummary(),
+      ]);
+      const costs     = costsResult.status     === 'fulfilled' ? (costsResult.value     ?? []) : [];
+      const summaries = summariesResult.status === 'fulfilled' ? (summariesResult.value ?? []) : [];
+      const serverList = buildServerList(costs, summaries);
+      setResServers(serverList);
+      resTimeSeriesCache.current = {};
+      if (serverList.length > 0 && !resSelectedSrv) {
+        setResSelectedSrv(serverList[0]);
+      }
+    } catch {
+      setResServers([]);
+    } finally {
+      setResLoading(false);
+    }
+  }, [resSelectedSrv]);
+
+  useEffect(() => {
+    if (tab === 'resources' && resServers.length === 0 && !resLoading) {
+      loadResources();
+    }
+  }, [tab, resServers.length, resLoading, loadResources]);
+
+  useEffect(() => {
+    if (!resSelectedSrv || resSubTab !== 'charts') return;
+    const key = resSelectedSrv.name;
+    if (resTimeSeriesCache.current[key]) {
+      setResTimeSeries(resTimeSeriesCache.current[key]);
+      return;
+    }
+    const serverName = resSelectedSrv.name;
+    const load = async () => {
+      setResChartLoading(true);
+      try {
+        const raw = await resourcesService.getServerTimeSeries(serverName, 7);
+        const data = (raw || [])
+          .map(d => ({
+            timestamp:  d.recorded_at || d.timestamp,
+            cpu_usage:  parseFloat(d.cpu_usage  || 0),
+            ram_usage:  parseFloat(d.ram_usage  || 0),
+            disk_usage: parseFloat(d.disk_usage || 0),
+          }))
+          .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        resTimeSeriesCache.current[key] = data;
+        setResTimeSeries(data);
+      } catch { /* time-series request failed, show empty charts */
+        setResTimeSeries([]);
+      } finally {
+        setResChartLoading(false);
+      }
+    };
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resSelectedSrv?.name, resSubTab]);
+
+  const resFiltered = useMemo(() => {
+    const q = resSearch.toLowerCase();
+    return resServers.filter(s =>
+      (s.name.toLowerCase().includes(q) || (s.reference || '').toLowerCase().includes(q)) &&
+      (resTypeFilter   === 'all' || s.type   === resTypeFilter) &&
+      (resStatusFilter === 'all' || s.status === resStatusFilter),
+    );
+  }, [resServers, resSearch, resTypeFilter, resStatusFilter]);
+
+  const resSummary = useMemo(() => generateSummary(resFiltered), [resFiltered]);
+
   const loadFiles = useCallback(async () => {
     try {
       setLoading(true);
@@ -1074,7 +1165,7 @@ export default function Files() {
       setTesting(true); setTestResult(null);
       toast.loading('Test de connexion...', { id: 'test' });
       let parsedHeaders = {};
-      try { if (extraHeaders.trim()) parsedHeaders = JSON.parse(extraHeaders); } catch {}
+      try { if (extraHeaders.trim()) parsedHeaders = JSON.parse(extraHeaders); } catch { /* invalid JSON, use empty headers */ }
       await api.post('/files/test-connection', {
         source_name: preset.name, costs: [], metadata: { test: true },
         auth_fields: apiFields, url: apiUrl, method: httpMethod,
@@ -1097,7 +1188,7 @@ export default function Files() {
       setImporting(true); setImportResult(null);
       toast.loading('Import en cours...', { id: 'api-import' });
       let parsedHeaders = {};
-      try { if (extraHeaders.trim()) parsedHeaders = JSON.parse(extraHeaders); } catch {}
+      try { if (extraHeaders.trim()) parsedHeaders = JSON.parse(extraHeaders); } catch { /* invalid JSON, use empty headers */ }
       const res = await api.post('/files/fetch-and-import', {
         source_name: preset.name, costs: [],
         metadata: { url: apiUrl, auth_type: preset.authType, start_date: startDate, end_date: endDate, extra_headers: parsedHeaders, method: httpMethod },
@@ -1189,8 +1280,9 @@ export default function Files() {
       }}>
         {/* Onglets */}
         <div style={{ display: 'flex', borderBottom: '1px solid #e8edf5', paddingLeft: 8 }}>
-          <Tab active={tab === 'file'} onClick={() => setTab('file')} icon={Upload} label="Upload fichier" color="#1B5E46" />
-          <Tab active={tab === 'api'}  onClick={() => setTab('api')}  icon={Link}   label="Connexion API"  color="#00b3ff" />
+          <Tab active={tab === 'file'}      onClick={() => setTab('file')}      icon={Upload} label="Upload fichier" color="#1B5E46" />
+          <Tab active={tab === 'api'}       onClick={() => setTab('api')}       icon={Link}   label="Connexion API"  color="#00b3ff" />
+          <Tab active={tab === 'resources'} onClick={() => setTab('resources')} icon={Server} label="Ressources"     color="#7c3aed" />
         </div>
 
         {/* ════════════ ONGLET FICHIER ════════════ */}
@@ -1509,6 +1601,215 @@ export default function Files() {
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ════════════ ONGLET RESSOURCES ════════════ */}
+        {tab === 'resources' && (
+          <div style={{ padding: '24px 28px 28px' }}>
+
+            {/* Sub-tab bar */}
+            <div style={{
+              display: 'flex', gap: 4, marginBottom: 20,
+              borderBottom: '2px solid #e2e8f0', paddingBottom: 4,
+            }}>
+              {[
+                { id: 'servers',  label: 'Serveurs',      icon: Server    },
+                { id: 'charts',   label: 'Métriques',     icon: Activity  },
+                { id: 'insights', label: 'Optimisations', icon: Lightbulb },
+              ].map(({ id, label, icon: Icon }) => (
+                <button key={id} onClick={() => setResSubTab(id)} style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '10px 20px', borderRadius: '10px 10px 0 0',
+                  border: resSubTab === id ? '2px solid #7c3aed' : '2px solid transparent',
+                  background: resSubTab === id ? 'white' : 'transparent',
+                  fontWeight: resSubTab === id ? 800 : 500,
+                  color: resSubTab === id ? '#7c3aed' : '#94a3b8',
+                  fontSize: 13, cursor: 'pointer', fontFamily: 'inherit',
+                  transition: 'all .15s', whiteSpace: 'nowrap',
+                }}>
+                  <Icon size={15} /> {label}
+                </button>
+              ))}
+              <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, color: '#94a3b8' }}>
+                  {resServers.length} serveur{resServers.length !== 1 ? 's' : ''}
+                </span>
+                <button onClick={loadResources} disabled={resLoading} style={{
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  padding: '7px 14px', borderRadius: 8,
+                  background: '#f8fafc', border: '1.5px solid #e2e8f0',
+                  color: '#374151', fontSize: 11, fontWeight: 700,
+                  cursor: resLoading ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+                }}>
+                  <RefreshCw size={12} style={{ animation: resLoading ? 'spin 1s linear infinite' : 'none' }} />
+                  Actualiser
+                </button>
+              </div>
+            </div>
+
+            {/* KPI strip */}
+            {resServers.length > 0 && (
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+                {[
+                  { label: 'Coût total',  val: `${Number(resSummary.totalCost || 0).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`, icon: DollarSign,  color: '#1B5E46', bg: '#f0fdf4' },
+                  { label: 'CPU moyen',   val: `${(resSummary.avgCpu || 0).toFixed(1)}%`,   icon: Cpu,         color: '#2563eb', bg: '#eff6ff' },
+                  { label: 'RAM moyenne', val: `${(resSummary.avgRam || 0).toFixed(1)} GB`,  icon: MemoryStick, color: '#7c3aed', bg: '#f5f3ff' },
+                  { label: 'Optimisés',   val: `${resSummary.optimized}/${resSummary.total}`, icon: CheckCircle, color: '#16a34a', bg: '#f0fdf4' },
+                ].map(k => (
+                  <div key={k.label} style={{
+                    flex: '1 1 150px', background: k.bg,
+                    border: `1px solid ${k.color}33`, borderRadius: 14,
+                    padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12,
+                  }}>
+                    <div style={{
+                      width: 36, height: 36, borderRadius: 10, background: k.color,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                    }}>
+                      <k.icon size={17} color="white" />
+                    </div>
+                    <div>
+                      <p style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 2 }}>{k.label}</p>
+                      <p style={{ fontSize: 20, fontWeight: 900, color: '#0f172a', lineHeight: 1 }}>{k.val}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* ── SERVERS SUB-TAB ── */}
+            {resSubTab === 'servers' && (
+              <div>
+                <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <div style={{ position: 'relative', flex: '1 1 200px' }}>
+                    <Search size={15} style={{
+                      position: 'absolute', left: 12, top: '50%',
+                      transform: 'translateY(-50%)', color: '#94a3b8',
+                    }} />
+                    <input
+                      value={resSearch}
+                      onChange={e => setResSearch(e.target.value)}
+                      placeholder="Rechercher un serveur ou une référence…"
+                      style={{
+                        width: '100%', padding: '9px 12px 9px 34px',
+                        borderRadius: 10, border: '1.5px solid #e2e8f0',
+                        fontSize: 13, fontFamily: 'inherit', color: '#0f172a',
+                        background: 'white', boxSizing: 'border-box', outline: 'none',
+                      }}
+                      onFocus={e => { e.target.style.borderColor = '#7c3aed'; }}
+                      onBlur={e  => { e.target.style.borderColor = '#e2e8f0'; }}
+                    />
+                  </div>
+                  {['all', 'VPS', 'Dedicated'].map(t => (
+                    <button key={t} onClick={() => setResTypeFilter(t)} style={{
+                      padding: '7px 14px', borderRadius: 99, fontWeight: 700, fontSize: 12,
+                      background: resTypeFilter === t
+                        ? (t === 'VPS' ? '#f3e8ff' : t === 'Dedicated' ? '#eff6ff' : '#e0e7ff')
+                        : '#f8fafc',
+                      color: resTypeFilter === t
+                        ? (t === 'VPS' ? '#7c3aed' : t === 'Dedicated' ? '#2563eb' : '#4f46e5')
+                        : '#64748b',
+                      border: resTypeFilter === t
+                        ? `1.5px solid ${t === 'VPS' ? '#c4b5fd' : '#93c5fd'}`
+                        : '1px solid #e2e8f0',
+                      cursor: 'pointer', fontFamily: 'inherit',
+                    }}>
+                      {t === 'all' ? 'Tous' : t === 'VPS' ? '🖥️ VPS' : '🗄️ Dédiés'}
+                    </button>
+                  ))}
+                  {['all', 'optimized', 'underutilized', 'critical'].map(s => {
+                    const lbl   = { all: 'Tous', optimized: '✅ Optimisé', underutilized: '⚠️ Sous-utilisé', critical: '🔴 Critique' }[s];
+                    const color = { all: '#4f46e5', optimized: '#16a34a', underutilized: '#d97706', critical: '#dc2626' }[s];
+                    const bg    = { all: '#e0e7ff', optimized: '#f0fdf4', underutilized: '#fffbeb', critical: '#fff5f5' }[s];
+                    const on    = resStatusFilter === s;
+                    return (
+                      <button key={s} onClick={() => setResStatusFilter(s)} style={{
+                        padding: '7px 14px', borderRadius: 99, fontWeight: 700, fontSize: 12,
+                        background: on ? bg : '#f8fafc',
+                        color: on ? color : '#64748b',
+                        border: on ? `1.5px solid ${color}55` : '1px solid #e2e8f0',
+                        cursor: 'pointer', fontFamily: 'inherit',
+                      }}>
+                        {lbl}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ borderRadius: 14, border: '1px solid #e2e8f0', overflow: 'hidden' }}>
+                  <ServerTable
+                    servers={resFiltered}
+                    loading={resLoading}
+                    onServerSelect={s => { setResSelectedSrv(s); setResSubTab('charts'); }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* ── CHARTS SUB-TAB ── */}
+            {resSubTab === 'charts' && (
+              <div>
+                <div style={{
+                  background: 'white', borderRadius: 14, padding: '16px 20px',
+                  border: '1px solid #e2e8f0', marginBottom: 20,
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  flexWrap: 'wrap', gap: 12,
+                }}>
+                  <div>
+                    <h3 style={{ fontSize: 15, fontWeight: 800, color: '#0f172a', marginBottom: 4 }}>
+                      {resSelectedSrv?.name || 'Sélectionnez un serveur'}
+                    </h3>
+                    <p style={{ fontSize: 11, color: '#94a3b8' }}>
+                      {resSelectedSrv?.hasRealData
+                        ? `CPU avg: ${resSelectedSrv.avgCpu.toFixed(1)}% | Pic: ${resSelectedSrv.peakCpu.toFixed(1)}% | RAM avg: ${resSelectedSrv.avgRam.toFixed(1)} GB`
+                        : "Aucune métrique disponible — vérifiez l'ingestion OVH"}
+                    </p>
+                  </div>
+                  <select
+                    value={resSelectedSrv?.name || ''}
+                    onChange={e => {
+                      const srv = resServers.find(s => s.name === e.target.value);
+                      if (srv) setResSelectedSrv(srv);
+                    }}
+                    style={{
+                      padding: '9px 14px', borderRadius: 9, border: '1.5px solid #e2e8f0',
+                      fontSize: 13, fontFamily: 'inherit', cursor: 'pointer',
+                      background: 'white', color: '#0f172a',
+                    }}
+                  >
+                    {resServers.map(s => (
+                      <option key={s.name} value={s.name}>{s.name} ({s.type})</option>
+                    ))}
+                  </select>
+                </div>
+
+                {!resSelectedSrv ? (
+                  <div style={{ padding: 60, textAlign: 'center', color: '#94a3b8' }}>
+                    <BarChart2 size={40} style={{ opacity: .2, margin: '0 auto 12px', display: 'block' }} />
+                    <p style={{ fontSize: 13, fontWeight: 600, color: '#64748b' }}>
+                      Sélectionnez un serveur pour afficher ses métriques
+                    </p>
+                  </div>
+                ) : resChartLoading ? (
+                  <div style={{ padding: 60, textAlign: 'center', color: '#94a3b8' }}>
+                    <RefreshCw size={26} style={{ animation: 'spin 1s linear infinite', margin: '0 auto 10px', display: 'block', opacity: .4 }} />
+                    <p style={{ fontSize: 12 }}>Chargement des métriques…</p>
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 16 }}>
+                    <ResourceChart data={resTimeSeries} metricKey="cpu_usage"  label="CPU Usage"  unit="%" color="#2563eb" threshold={85} />
+                    <ResourceChart data={resTimeSeries} metricKey="ram_usage"  label="RAM Usage"  unit="GB" color="#7c3aed" />
+                    <ResourceChart data={resTimeSeries} metricKey="disk_usage" label="Disk Usage" unit="GB" color="#ea580c" />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── INSIGHTS SUB-TAB ── */}
+            {resSubTab === 'insights' && (
+              <div>
+                <Insights servers={resFiltered} />
               </div>
             )}
           </div>
