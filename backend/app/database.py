@@ -7,7 +7,10 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-os.makedirs(os.path.dirname(settings.database_url.replace("sqlite:///", "")), exist_ok=True) if "/" in settings.database_url.replace("sqlite:///", "") else None
+# Ensure database directory exists for file-based databases (e.g., SQLite)
+_db_path = settings.database_url.replace("sqlite:///", "")
+if "/" in _db_path:
+    os.makedirs(os.path.dirname(_db_path), exist_ok=True)
 
 engine = create_engine(
     settings.database_url,

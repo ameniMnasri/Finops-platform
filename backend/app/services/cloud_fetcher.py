@@ -17,6 +17,34 @@ logger = logging.getLogger(__name__)
 
 OVH_API_BASE = "https://eu.api.ovh.com/1.0"
 
+# Allowlist of trusted cloud provider domains to prevent SSRF attacks.
+ALLOWED_DOMAINS = {
+    "eu.api.ovh.com",
+    "ca.api.ovh.com",
+    "us.api.ovh.com",
+    "api.ovh.com",
+    "ce.us-east-1.amazonaws.com",
+    "management.azure.com",
+    "login.microsoftonline.com",
+    "cloudbilling.googleapis.com",
+}
+
+
+def _validate_url(url: str) -> None:
+    """Raise ValueError if the URL's host is not in the allowed domain list."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        raise ValueError(f"Invalid URL: {url}")
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"URL scheme must be http or https, got: {parsed.scheme}")
+    host = parsed.hostname or ""
+    if not any(host == d or host.endswith("." + d) for d in ALLOWED_DOMAINS):
+        raise ValueError(
+            f"URL host '{host}' is not in the list of allowed cloud provider domains. "
+            "Only known cloud provider APIs are supported."
+        )
+
 
 class CloudFetcher:
     """Fetches cloud cost data from various providers."""
@@ -31,14 +59,18 @@ class CloudFetcher:
         self.start_date = payload.get("start_date")
         self.end_date = payload.get("end_date")
         self.extra_headers = payload.get("extra_headers", {})
+        # Validate URL early to prevent SSRF
+        if self.url:
+            _validate_url(self.url)
 
     # ─────────────────────────────── OVH helpers ────────────────────────────────
 
     def _ovh_sign(self, method: str, url: str, body: str, timestamp: int) -> str:
+        """Compute HMAC SHA1 — required by the OVH API authentication specification."""
         app_secret = self.auth_fields.get("app_secret", "")
         consumer_key = self.auth_fields.get("consumer_key", "")
         pre_hash = "+".join([app_secret, consumer_key, method.upper(), url, body, str(timestamp)])
-        return "$1$" + hashlib.sha1(pre_hash.encode("utf-8")).hexdigest()
+        return "$1$" + hashlib.sha1(pre_hash.encode("utf-8")).hexdigest()  # nosec B303 - OVH API requires SHA1
 
     def _get_ovh_time_delta(self) -> int:
         try:

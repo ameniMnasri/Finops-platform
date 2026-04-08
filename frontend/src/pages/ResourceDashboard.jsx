@@ -55,15 +55,14 @@ export default function ResourceDashboard() {
   const [importing,   setImporting]   = useState(false);
   const [importResult,setImportResult]= useState(null);
 
-  // OVH credentials (stored in sessionStorage for convenience — never committed)
+  // OVH credentials (stored in sessionStorage for convenience — cleared when tab closes, never persisted to localStorage)
   const [appKey,      setAppKey]      = useState(() => sessionStorage.getItem('ovh_ak') || '');
-  const [appSecret,   setAppSecret]   = useState(() => sessionStorage.getItem('ovh_as') || '');
+  const [appSecret,   setAppSecret]   = useState('');  // Never persisted — entered each session for security
   const [consumerKey, setConsumerKey] = useState(() => sessionStorage.getItem('ovh_ck') || '');
   const [showCreds,   setShowCreds]   = useState(false);
 
-  // Persist creds in sessionStorage (cleared on tab close)
+  // Persist non-secret creds in sessionStorage (cleared on tab close). App secret is NOT persisted.
   useEffect(() => { sessionStorage.setItem('ovh_ak', appKey); },      [appKey]);
-  useEffect(() => { sessionStorage.setItem('ovh_as', appSecret); },   [appSecret]);
   useEffect(() => { sessionStorage.setItem('ovh_ck', consumerKey); }, [consumerKey]);
 
   // ── Load latest metrics from DB ──────────────────────────────────────────

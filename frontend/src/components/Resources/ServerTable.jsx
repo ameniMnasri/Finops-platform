@@ -56,6 +56,10 @@ export default function ServerTable({ metrics, onSelectServer }) {
       return sortDir === 'asc' ? av - bv : bv - av;
     });
 
+  // Pre-calculate max values once to avoid O(n²) in render
+  const maxRam  = Math.max(...metrics.map(x => x.ram_usage  || 0), 1);
+  const maxDisk = Math.max(...metrics.map(x => x.disk_usage || 0), 1);
+
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
     else { setSortKey(key); setSortDir('desc'); }
@@ -163,10 +167,10 @@ export default function ServerTable({ metrics, onSelectServer }) {
                     <UsageBar value={m.cpu_usage} max={100} color="cpu" />
                   </td>
                   <td style={{ padding: '14px 16px', minWidth: 160 }}>
-                    <UsageBar value={m.ram_usage} max={Math.max(...metrics.map(x => x.ram_usage || 0), 1)} color="ram" />
+                    <UsageBar value={m.ram_usage} max={maxRam} color="ram" />
                   </td>
                   <td style={{ padding: '14px 16px', minWidth: 160 }}>
-                    <UsageBar value={m.disk_usage} max={Math.max(...metrics.map(x => x.disk_usage || 0), 1)} color="disk" />
+                    <UsageBar value={m.disk_usage} max={maxDisk} color="disk" />
                   </td>
                   <td style={{ padding: '14px 16px' }}>
                     <StatusBadge avgCpu={m.cpu_usage} />

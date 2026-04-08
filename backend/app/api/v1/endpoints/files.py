@@ -100,7 +100,7 @@ def parse_file(
         logger.error(f"Parse error for file {file_id}: {e}")
         db_file.parse_status = FileStatus.FAILED
         db.commit()
-        raise HTTPException(status_code=500, detail=f"Parse failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Parse failed. Check server logs for details.")
 
 
 @router.post("/api-test")
@@ -112,7 +112,8 @@ async def api_test(payload: dict, current_user: User = Depends(get_current_user)
         result = fetcher.test_connection()
         return result
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"API test error: {e}")
+        raise HTTPException(status_code=400, detail="Connection failed. Check your API credentials and URL.")
 
 
 @router.post("/import-api")
@@ -151,8 +152,11 @@ async def import_api(
             "costs_skipped": len(costs) - created,
             "errors": meta.get("errors", []),
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"API import error: {e}")
+        raise HTTPException(status_code=400, detail="Import failed. Check your API credentials and URL.")
 
 
 @router.get("/{file_id}", response_model=FileDetailResponse)

@@ -44,7 +44,10 @@ class OVHResourceFetcher:
         return int(time.time()) + self._time_delta
 
     def _sign_request(self, method: str, url: str, body: str, timestamp: int) -> str:
-        """Compute HMAC SHA1 signature as required by OVH API."""
+        """Compute HMAC SHA1 signature as required by OVH API.
+        Note: SHA1 is mandated by the OVH API authentication specification and cannot be replaced.
+        See: https://help.ovhcloud.com/csm/en-api-getting-started-ovhcloud-api
+        """
         pre_hash = "+".join([
             self.app_secret,
             self.consumer_key,
@@ -53,7 +56,7 @@ class OVHResourceFetcher:
             body,
             str(timestamp),
         ])
-        return "$1$" + hashlib.sha1(pre_hash.encode("utf-8")).hexdigest()
+        return "$1$" + hashlib.sha1(pre_hash.encode("utf-8")).hexdigest()  # nosec B303 - OVH API requires SHA1
 
     def _request(self, method: str, path: str) -> Any:
         """Make an authenticated request to the OVH API."""
