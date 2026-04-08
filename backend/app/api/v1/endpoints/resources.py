@@ -6,7 +6,7 @@ from datetime import datetime
 
 import requests
 
-from app.dependencies import get_db
+from app.dependencies import get_db, get_current_user
 from app.models.resource import ResourceMetric
 from app.schemas.resource import (
     ResourceMetricCreate,
@@ -15,9 +15,10 @@ from app.schemas.resource import (
     ResourceAverageStats,
     ResourcePeakStats,
 )
+from app.schemas.user import User
 from app.services import resource_service
 from app.services.cloud_fetcher import get_ovh_resource_fetcher
-from pydantic import BaseModel
+from app.schemas.cloud import OVHCredentials
 
 import logging
 logger = logging.getLogger(__name__)
@@ -32,10 +33,8 @@ router = APIRouter(
 # REQUEST SCHEMAS
 # ─────────────────────────────────────────────────────────────────────────────
 
-class OVHImportRequest(BaseModel):
-    app_key:      str
-    app_secret:   str
-    consumer_key: str
+class OVHImportRequest(OVHCredentials):
+    """OVH credentials for the /resources/import-ovh endpoint."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -319,13 +318,14 @@ def get_all_servers_summary(
 def import_ovh_resources(
     payload: OVHImportRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     POST /resources/import-ovh
     Accepts OVHcloud credentials and imports server metrics.
-    No authentication required beyond the OVH credentials themselves.
+    Requires a valid application user session.
     """
-    logger.info("🌐 POST /resources/import-ovh — starting OVHcloud resource import")
+    logger.info(f"🌐 POST /resources/import-ovh by {current_user.email}")
     try:
         fetcher = get_ovh_resource_fetcher()
         auth_fields = {
@@ -362,4 +362,4 @@ def import_ovh_resources(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"❌ import-ovh error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Import OVHcloud failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Import OVHcloud failed — consultez les logs serveur")

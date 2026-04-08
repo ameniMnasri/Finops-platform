@@ -371,9 +371,10 @@ class OVHResourceFetcher:
         body:         str,
         timestamp:    str,
     ) -> str:
+        # OVH API mandates HMAC-SHA1 for request signing — protocol requirement.
         pre_hash = "+".join([app_secret, consumer_key,
                              method.upper(), url, body, timestamp])
-        return "$1$" + hashlib.sha1(pre_hash.encode("utf-8")).hexdigest()
+        return "$1$" + hashlib.sha1(pre_hash.encode("utf-8")).hexdigest()  # nosec B324
 
     def _request(
         self,

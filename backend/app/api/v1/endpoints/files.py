@@ -22,9 +22,7 @@ from app.services import resource_service
 from app.services.cloud_fetcher import get_fetcher, get_ovh_resource_fetcher
 from app.dependencies import get_current_user
 from app.config import settings
-
-logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/files", tags=["files"])
+from app.schemas.cloud import OVHCredentials
 
 
 # ==================== PYDANTIC SCHEMAS ====================
@@ -57,10 +55,8 @@ class FetchAndImportRequest(BaseModel):
     metadata:      Optional[Dict[str, Any]] = {}
 
 
-class OVHResourceImportRequest(BaseModel):
-    app_key:      str
-    app_secret:   str
-    consumer_key: str
+class OVHResourceImportRequest(OVHCredentials):
+    """OVH credentials for the /files/import-ovh-resources endpoint."""
 
 
 # ==================== LIST FILES ====================
@@ -436,7 +432,7 @@ def import_ovh_resources(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"❌ import-ovh-resources error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Import OVHcloud failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Import OVHcloud failed — consultez les logs serveur")
 
 
 # ==================== DELETE ====================
