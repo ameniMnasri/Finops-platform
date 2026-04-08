@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, DollarSign, FileText,
   Settings, LogOut, ChevronDown, ChevronUp,
-  BarChart2,
+  BarChart2, Server,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
@@ -51,7 +51,7 @@ export default function Sidebar() {
         {/* Section avec dropdown */}
         <div>
           <button
-            className={`nav-item ${isActive('/files') || isActive('/costs') ? 'active' : ''}`}
+            className={`nav-item ${isActive('/files') || isActive('/costs') || isActive('/resources') ? 'active' : ''}`}
             onClick={() => setDashOpen(!dashOpen)}
             style={{ justifyContent: 'space-between' }}
           >
@@ -64,8 +64,9 @@ export default function Sidebar() {
 
           {dashOpen && (
             <div style={{ marginLeft: 16, marginTop: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <NavLink to="/files" icon={FileText}    label="Fichiers"   />
-              <NavLink to="/costs" icon={DollarSign}  label="Coûts"      />
+              <NavLink to="/files"     icon={FileText}    label="Fichiers"   />
+              <NavLink to="/costs"     icon={DollarSign}  label="Coûts"      />
+              <NavLink to="/resources" icon={Server}      label="Ressources" />
             </div>
           )}
         </div>
