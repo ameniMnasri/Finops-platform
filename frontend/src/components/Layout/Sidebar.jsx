@@ -67,6 +67,7 @@ export default function Sidebar() {
               <NavLink to="/files" icon={FileText}    label="Fichiers"   />
               <NavLink to="/costs" icon={DollarSign}  label="Coûts"      />
               <NavLink to="/Devis" icon={DollarSign}  label="Devis"      />
+              <NavLink to="/anomalies" icon={BarChart2}  label="Anomalies"  />
               <NavLink to="/resources" icon={Server} label="Ressources" />
 
             </div>

@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import settings          # your existing settings object
-from app.database import Base            # your existing declarative Base
+from app.schemas.base import Base
 
 # Import ALL models here so Alembic can detect them for --autogenerate
 from app.models import user              # noqa: F401
@@ -19,7 +19,7 @@ from app.models import resource          # noqa: F401  ← NEW
 config = context.config
 
 # Override sqlalchemy.url with the real DB URL from your app settings
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", settings.database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

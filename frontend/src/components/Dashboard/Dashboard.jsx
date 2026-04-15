@@ -8,7 +8,7 @@ import {
   DollarSign, Zap, FolderOpen, TrendingUp, FileText,
   Activity, Download, RefreshCw, ArrowUpRight, ArrowDownRight,
   AlertTriangle, BarChart2, Receipt, Percent, ChevronDown, Check,
-  Server, Settings, Flame, Minus, Eye, EyeOff, TrendingDown,
+  Server, Settings, Flame, Minus, Eye, EyeOff, TrendingDown, FileBarChart,
 } from 'lucide-react';
 import Layout from '../Layout/Layout';
 import { costsService } from '../../services/costs';
@@ -1541,6 +1541,373 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
     toast.success('Export CSV téléchargé !');
   };
 
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+
+  const handleExportReport = () => {
+    if (!filtered.length || !analytics) return;
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('fr-FR', { day:'2-digit', month:'long', year:'numeric' });
+    const timeStr = now.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+
+    // Build top services table rows
+    const topRows = Object.entries(analytics.itemTotals||{})
+      .sort((a,b)=>b[1]-a[1]).slice(0,20)
+      .map(([name,total],i) => {
+        const cat = detectOvhCategory(name);
+        const pct = analytics.total>0 ? ((total/analytics.total)*100).toFixed(1) : '0.0';
+        const tva = total*0.2; const ttc = total*1.2;
+        const catColor = CAT_COLOR_MAP[cat]||'#64748b';
+        return `<tr class="${i%2===0?'even':'odd'}">
+          <td class="rank">#${i+1}</td>
+          <td class="service-name">${extractRef(name)}</td>
+          <td><span class="badge" style="background:${catColor}20;color:${catColor};border:1px solid ${catColor}40">${cat}</span></td>
+          <td class="amount">${fmt2(total)} €</td>
+          <td class="amount muted">${fmt2(tva)} €</td>
+          <td class="amount">${fmt2(ttc)} €</td>
+          <td><div class="bar-wrap"><div class="bar-fill" style="width:${Math.min(parseFloat(pct),100)}%;background:${catColor}"></div></div><span class="pct">${pct}%</span></td>
+        </tr>`;
+      }).join('');
+
+    // Build monthly evolution table
+    const monthRows = (analytics.byMonth||[]).map((m,i) => {
+      const prev = analytics.byMonth[i-1];
+      const delta = prev && prev.total>0 ? ((m.total-prev.total)/prev.total*100) : null;
+      const arrow = delta===null?'—':delta>0?`▲ +${delta.toFixed(1)}%`:`▼ ${delta.toFixed(1)}%`;
+      const arrowColor = delta===null?'#94a3b8':delta>0?'#ef4444':'#16a34a';
+      return `<tr class="${i%2===0?'even':'odd'}">
+        <td><strong>${m.label}</strong></td>
+        <td class="amount">${fmt2(m.total)} €</td>
+        <td class="amount muted">${fmt2(m.total*0.2)} €</td>
+        <td class="amount">${fmt2(m.total*1.2)} €</td>
+        <td style="color:${arrowColor};font-weight:700;font-size:12px">${arrow}</td>
+      </tr>`;
+    }).join('');
+
+    // By category section
+    const catRows = (analytics.donutByCategory||[]).map((c,i) => {
+      const color = CAT_COLOR_MAP[c.name]||COLORS[i%COLORS.length];
+      const pct = analytics.total>0 ? ((c.value/analytics.total)*100).toFixed(1) : '0.0';
+      return `<tr class="${i%2===0?'even':'odd'}">
+        <td><span class="dot" style="background:${color}"></span>${c.name}</td>
+        <td class="amount">${fmt2(c.value)} €</td>
+        <td class="amount muted">${fmt2(c.value*0.2)} €</td>
+        <td class="amount">${fmt2(c.value*1.2)} €</td>
+        <td><div class="bar-wrap"><div class="bar-fill" style="width:${Math.min(parseFloat(pct),100)}%;background:${color}"></div></div><span class="pct">${pct}%</span></td>
+      </tr>`;
+    }).join('');
+
+    // By source section
+    const srcRows = (analytics.bySource||[]).map((s,i) => {
+      const pct = analytics.total>0 ? ((s.value/analytics.total)*100).toFixed(1) : '0.0';
+      return `<tr class="${i%2===0?'even':'odd'}">
+        <td>${SOURCE_ICONS[s.name]||'📊'} ${s.name}</td>
+        <td class="amount">${fmt2(s.value)} €</td>
+        <td class="amount muted">${fmt2(s.value*0.2)} €</td>
+        <td class="amount">${fmt2(s.value*1.2)} €</td>
+        <td class="pct">${pct}%</td>
+      </tr>`;
+    }).join('');
+
+    // Raw detail table (first 200 entries)
+    const detailRows = filtered.slice(0,200).map((c,i) => {
+      const ht = Number(c.amount||0);
+      const ref = [c.reference,c.resource_id,c.external_id].filter(Boolean)[0]||'—';
+      const cat = detectOvhCategory(c.service_name);
+      const catColor = CAT_COLOR_MAP[cat]||'#64748b';
+      return `<tr class="${i%2===0?'even':'odd'}">
+        <td style="white-space:nowrap">${c.cost_date||'—'}</td>
+        <td class="service-name">${shortName(c.service_name,40)}</td>
+        <td><span class="badge" style="background:${catColor}20;color:${catColor};border:1px solid ${catColor}40">${cat}</span></td>
+        <td style="font-size:11px;color:#64748b">${ref.slice(0,25)}</td>
+        <td class="amount">${fmt2(ht)} €</td>
+        <td class="amount muted">${fmt2(ht*0.2)} €</td>
+        <td class="amount">${fmt2(ht*1.2)} €</td>
+        <td style="font-size:11px;color:#64748b">${c.source||'—'}</td>
+      </tr>`;
+    }).join('');
+
+    const trendBadge = analytics.trendPct > 0
+      ? `<span style="color:#ef4444;background:#fef2f2;padding:3px 10px;border-radius:99px;border:1px solid #fecaca;font-size:12px">▲ +${analytics.trendPct}% vs mois préc.</span>`
+      : analytics.trendPct < 0
+      ? `<span style="color:#16a34a;background:#f0fdf4;padding:3px 10px;border-radius:99px;border:1px solid #bbf7d0;font-size:12px">▼ ${analytics.trendPct}% vs mois préc.</span>`
+      : '';
+
+    const html = `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Rapport FinOps — ${dateStr}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8fafc;color:#0f172a;font-size:13px}
+  @media print{body{background:white}.page-break{page-break-before:always}}
+
+  /* HEADER */
+  .report-header{background:linear-gradient(135deg,#0f2027 0%,#1B5E46 60%,#2563EB 100%);padding:40px 48px 32px;color:white;position:relative;overflow:hidden}
+  .report-header::before{content:'';position:absolute;top:-60px;right:-60px;width:240px;height:240px;border-radius:50%;background:rgba(255,255,255,.05)}
+  .report-header::after{content:'';position:absolute;bottom:-40px;left:200px;width:160px;height:160px;border-radius:50%;background:rgba(255,255,255,.03)}
+  .header-logo{font-size:28px;font-weight:900;letter-spacing:-1px;margin-bottom:4px}
+  .header-sub{font-size:13px;opacity:.65;margin-bottom:24px}
+  .header-meta{display:flex;gap:24px;flex-wrap:wrap}
+  .meta-item{background:rgba(255,255,255,.12);border-radius:10px;padding:10px 18px;border:1px solid rgba(255,255,255,.15)}
+  .meta-item label{font-size:10px;opacity:.6;text-transform:uppercase;letter-spacing:.08em;display:block;margin-bottom:3px}
+  .meta-item value{font-size:15px;font-weight:800}
+
+  /* CONTAINER */
+  .container{max-width:1200px;margin:0 auto;padding:32px 32px 60px}
+
+  /* SECTION */
+  .section{margin-bottom:36px}
+  .section-title{font-size:16px;font-weight:800;color:#0f172a;margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid #e2e8f0;display:flex;align-items:center;gap:8px}
+  .section-title .icon{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+
+  /* KPI GRID */
+  .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:24px}
+  .kpi-card{background:white;border-radius:14px;padding:18px 20px;border:1.5px solid #e8edf5;box-shadow:0 1px 6px rgba(0,0,0,.04)}
+  .kpi-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#94a3b8;margin-bottom:6px}
+  .kpi-value{font-size:24px;font-weight:900;color:#0f172a;line-height:1}
+  .kpi-unit{font-size:13px;color:#94a3b8;font-weight:400}
+  .kpi-sub{font-size:11px;color:#64748b;margin-top:5px}
+
+  /* FISCAL BOX */
+  .fiscal-box{background:white;border-radius:14px;border:1.5px solid #e8edf5;padding:22px 24px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:24px}
+  .fiscal-item{flex:1;min-width:160px;border-radius:12px;padding:16px 18px}
+  .fiscal-item label{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;display:block;margin-bottom:6px}
+  .fiscal-item .val{font-size:26px;font-weight:900;color:#0f172a}
+  .fiscal-item .sub{font-size:11px;color:#64748b;margin-top:3px}
+  .fiscal-sep{font-size:28px;color:#cbd5e1;font-weight:200;flex-shrink:0}
+
+  /* TABLES */
+  .table-wrap{background:white;border-radius:14px;border:1.5px solid #e8edf5;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.04)}
+  table{width:100%;border-collapse:collapse}
+  thead tr{background:linear-gradient(90deg,#f8fafc,#f1f5f9)}
+  th{padding:10px 14px;text-align:left;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:#64748b;white-space:nowrap;border-bottom:1.5px solid #e2e8f0}
+  td{padding:9px 14px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+  tr.even td{background:white}
+  tr.odd td{background:#fafbfc}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:#f0f9ff}
+  .amount{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .muted{color:#7C3AED}
+  .rank{font-weight:900;color:#94a3b8;font-size:11px;text-align:center;width:36px}
+  .service-name{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+  .badge{padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700;white-space:nowrap}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:7px;vertical-align:middle}
+  .bar-wrap{display:inline-block;width:80px;height:6px;background:#f1f5f9;border-radius:99px;overflow:hidden;vertical-align:middle;margin-right:6px}
+  .bar-fill{height:6px;border-radius:99px;transition:width .3s}
+  .pct{font-size:11px;font-weight:700;color:#64748b}
+
+  /* NOTE */
+  .note{background:#fffbeb;border:1.5px solid #fcd34d;border-radius:10px;padding:12px 16px;font-size:11px;color:#92400e;margin-top:16px}
+  .footer{background:white;border-top:1.5px solid #e2e8f0;padding:20px 32px;text-align:center;font-size:11px;color:#94a3b8;margin-top:40px}
+  .footer strong{color:#1B5E46}
+
+  /* PAGE BREAK */
+  .page-section{page-break-inside:avoid}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ HEADER ═══════════════ -->
+<div class="report-header">
+  <div class="header-logo">⚡ FinOps Dashboard</div>
+  <div class="header-sub">Rapport de coûts cloud détaillé</div>
+  <div class="header-meta">
+    <div class="meta-item"><label>Date de génération</label><value>${dateStr} à ${timeStr}</value></div>
+    <div class="meta-item"><label>Période analysée</label><value>${period}</value></div>
+    <div class="meta-item"><label>Total HT</label><value>${fmt2(analytics.total)} €</value></div>
+    <div class="meta-item"><label>Total TTC</label><value>${fmt2(analytics.ttc)} €</value></div>
+    <div class="meta-item"><label>Entrées analysées</label><value>${analytics.nbEntries} lignes</value></div>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- ═══════════════ KPIs ═══════════════ -->
+<div class="section">
+  <div class="section-title"><span class="icon" style="background:#eff6ff">📊</span>Indicateurs clés de performance</div>
+  <div class="kpi-grid">
+    <div class="kpi-card" style="border-top:3px solid #2563EB">
+      <div class="kpi-label">Coût total HT</div>
+      <div class="kpi-value">${fmt2(analytics.total)} <span class="kpi-unit">€</span></div>
+      <div class="kpi-sub">${analytics.nbEntries} entrées · ${trendBadge||'Stable'}</div>
+    </div>
+    <div class="kpi-card" style="border-top:3px solid #8b5cf6">
+      <div class="kpi-label">TVA (20%)</div>
+      <div class="kpi-value">${fmt2(analytics.tva)} <span class="kpi-unit">€</span></div>
+      <div class="kpi-sub">Taxe sur la valeur ajoutée</div>
+    </div>
+    <div class="kpi-card" style="border-top:3px solid #f59e0b">
+      <div class="kpi-label">Total TTC</div>
+      <div class="kpi-value">${fmt2(analytics.ttc)} <span class="kpi-unit">€</span></div>
+      <div class="kpi-sub">Montant réellement débité</div>
+    </div>
+    <div class="kpi-card" style="border-top:3px solid #1B5E46">
+      <div class="kpi-label">Services actifs</div>
+      <div class="kpi-value">${analytics.nbServices} <span class="kpi-unit" style="font-size:14px">services</span></div>
+      <div class="kpi-sub">Ressources cloud actives</div>
+    </div>
+    <div class="kpi-card" style="border-top:3px solid #f97316">
+      <div class="kpi-label">Coût moyen HT</div>
+      <div class="kpi-value">${fmt2(analytics.avg)} <span class="kpi-unit">€</span></div>
+      <div class="kpi-sub">Par entrée de coût</div>
+    </div>
+    <div class="kpi-card" style="border-top:3px solid #ef4444">
+      <div class="kpi-label">Pic de coût</div>
+      <div class="kpi-value">${fmt2(analytics.maxCost)} <span class="kpi-unit">€</span></div>
+      <div class="kpi-sub">${analytics.maxEntry?shortName(analytics.maxEntry.service_name,28):'—'}</div>
+    </div>
+    <div class="kpi-card" style="border-top:3px solid #1B5E46">
+      <div class="kpi-label">Infra Serveurs</div>
+      <div class="kpi-value">${fmt2(analytics.totalServers)} <span class="kpi-unit">€</span></div>
+      <div class="kpi-sub">VPS & Dédiés</div>
+    </div>
+    <div class="kpi-card" style="border-top:3px solid #0891B2">
+      <div class="kpi-label">Services / Options</div>
+      <div class="kpi-value">${fmt2(analytics.totalServices)} <span class="kpi-unit">€</span></div>
+      <div class="kpi-sub">IP, Snapshots, DNS…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ FISCAL ═══════════════ -->
+<div class="section page-section">
+  <div class="section-title"><span class="icon" style="background:#f5f3ff">🧾</span>Récapitulatif fiscal</div>
+  <div class="fiscal-box">
+    <div class="fiscal-item" style="background:#f0fdf4;border:1.5px solid #bbf7d0">
+      <label style="color:#16a34a">Total HT</label>
+      <div class="val">${fmt2(analytics.total)} €</div>
+      <div class="sub">Hors taxes</div>
+    </div>
+    <div class="fiscal-sep">+</div>
+    <div class="fiscal-item" style="background:#faf5ff;border:1.5px solid #e9d5ff">
+      <label style="color:#7C3AED">TVA 20%</label>
+      <div class="val">${fmt2(analytics.tva)} €</div>
+      <div class="sub">Taxe sur la valeur ajoutée</div>
+    </div>
+    <div class="fiscal-sep">=</div>
+    <div class="fiscal-item" style="background:#f0f9ff;border:1.5px solid #bae6fd">
+      <label style="color:#0891B2">Total TTC</label>
+      <div class="val">${fmt2(analytics.ttc)} €</div>
+      <div class="sub">Toutes taxes comprises</div>
+    </div>
+    <div class="fiscal-item" style="background:#f8fafc;border:1.5px solid #e2e8f0;flex:1.5">
+      <label style="color:#374151">ℹ️ Calcul TVA</label>
+      <div style="font-size:11px;color:#64748b;line-height:1.7;margin-top:4px">Les coûts sont en <strong>HT</strong>.<br/>TVA française <strong>20%</strong> appliquée.<br/>TTC = montant réellement débité.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ TOP SERVICES ═══════════════ -->
+<div class="section page-section">
+  <div class="section-title"><span class="icon" style="background:#faf5ff">🏆</span>Top 20 services — Classement par coût HT</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th style="width:36px">#</th>
+        <th>Service / Référence</th>
+        <th>Catégorie</th>
+        <th style="text-align:right">Montant HT</th>
+        <th style="text-align:right">TVA 20%</th>
+        <th style="text-align:right">TTC</th>
+        <th>Part du total</th>
+      </tr></thead>
+      <tbody>${topRows}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════════════ PAR CATÉGORIE ═══════════════ -->
+<div class="section page-section">
+  <div class="section-title"><span class="icon" style="background:#fff7ed">📁</span>Répartition par catégorie OVH</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Catégorie</th>
+        <th style="text-align:right">Total HT</th>
+        <th style="text-align:right">TVA 20%</th>
+        <th style="text-align:right">TTC</th>
+        <th>Part</th>
+      </tr></thead>
+      <tbody>${catRows}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════════════ PAR SOURCE ═══════════════ -->
+<div class="section page-section">
+  <div class="section-title"><span class="icon" style="background:#f0fdf4">🔌</span>Répartition par source de données</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Source</th>
+        <th style="text-align:right">Total HT</th>
+        <th style="text-align:right">TVA 20%</th>
+        <th style="text-align:right">TTC</th>
+        <th>Part</th>
+      </tr></thead>
+      <tbody>${srcRows}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════════════ ÉVOLUTION MENSUELLE ═══════════════ -->
+<div class="section page-section page-break">
+  <div class="section-title"><span class="icon" style="background:#eff6ff">📈</span>Évolution mensuelle des coûts</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Mois</th>
+        <th style="text-align:right">Total HT</th>
+        <th style="text-align:right">TVA 20%</th>
+        <th style="text-align:right">TTC</th>
+        <th>Variation</th>
+      </tr></thead>
+      <tbody>${monthRows}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════════════ DÉTAIL COMPLET ═══════════════ -->
+<div class="section page-break">
+  <div class="section-title"><span class="icon" style="background:#f0f9ff">🔍</span>Détail complet des entrées de coûts${filtered.length>200?' (200 premières sur '+filtered.length+')':''}</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Date</th>
+        <th>Service / Nom</th>
+        <th>Catégorie</th>
+        <th>Référence</th>
+        <th style="text-align:right">HT</th>
+        <th style="text-align:right">TVA</th>
+        <th style="text-align:right">TTC</th>
+        <th>Source</th>
+      </tr></thead>
+      <tbody>${detailRows}</tbody>
+    </table>
+  </div>
+  ${filtered.length>200?`<div class="note">⚠️ Ce rapport affiche les 200 premières entrées sur ${filtered.length} au total. Exportez en CSV pour obtenir toutes les lignes.</div>`:''}
+</div>
+
+</div><!-- /container -->
+
+<div class="footer">
+  Rapport généré le <strong>${dateStr} à ${timeStr}</strong> · <strong>FinOps Dashboard</strong> · Données filtrées sur la période : <strong>${period}</strong>
+  <br/><span style="font-size:10px;color:#cbd5e1;margin-top:4px;display:block">Ce document est confidentiel — à usage interne uniquement</span>
+</div>
+
+</body></html>`;
+
+    const blob = new Blob([html], { type:'text/html;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = `rapport-finops-${now.toISOString().slice(0,10)}.html`;
+    a.click(); URL.revokeObjectURL(url);
+    setExportMenuOpen(false);
+    toast.success('📄 Rapport HTML détaillé téléchargé !');
+  };
+
   const isEmptyState = !loading && !filtered.length;
 
   return (
@@ -1573,9 +1940,42 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
               <button key={opt.label} onClick={()=>setPeriod(opt.label)} style={{ padding:'6px 14px',borderRadius:8,border:'none',fontFamily:'inherit',fontSize:12,fontWeight:600,cursor:'pointer',transition:'all .15s',background:period===opt.label?'white':'transparent',color:period===opt.label?'#1B5E46':'#94a3b8',boxShadow:period===opt.label?'0 1px 4px rgba(0,0,0,.08)':'none' }}>{opt.label}</button>
             ))}
           </div>
-          <button onClick={handleExport} disabled={!filtered.length} style={{ display:'flex',alignItems:'center',gap:6,padding:'8px 16px',background:'white',border:'1.5px solid #e2e8f0',borderRadius:10,fontWeight:600,fontSize:12,cursor:filtered.length?'pointer':'not-allowed',fontFamily:'inherit',color:'#374151',opacity:filtered.length?1:.5 }}>
-            <Download size={13}/> Export
-          </button>
+          <div style={{ position:'relative' }}>
+            <button
+              onClick={()=>setExportMenuOpen(v=>!v)}
+              disabled={!filtered.length}
+              style={{ display:'flex',alignItems:'center',gap:6,padding:'8px 14px',background:'white',border:'1.5px solid #e2e8f0',borderRadius:10,fontWeight:600,fontSize:12,cursor:filtered.length?'pointer':'not-allowed',fontFamily:'inherit',color:'#374151',opacity:filtered.length?1:.5 }}>
+              <Download size={13}/> Export <ChevronDown size={11} style={{ marginLeft:2,transform:exportMenuOpen?'rotate(180deg)':'none',transition:'transform .2s' }}/>
+            </button>
+            {exportMenuOpen && (
+              <div style={{ position:'absolute',top:'calc(100% + 6px)',right:0,background:'white',border:'1.5px solid #e2e8f0',borderRadius:12,boxShadow:'0 8px 32px rgba(0,0,0,.12)',zIndex:999,minWidth:220,overflow:'hidden',animation:'expandIn .15s ease' }}>
+                <div style={{ padding:'8px 12px 6px',borderBottom:'1px solid #f1f5f9' }}>
+                  <p style={{ fontSize:10,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.06em',margin:0 }}>Choisir le format</p>
+                </div>
+                <button onClick={()=>{handleExport();setExportMenuOpen(false);}} style={{ display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 14px',background:'white',border:'none',fontFamily:'inherit',cursor:'pointer',textAlign:'left',fontSize:13,color:'#374151',fontWeight:600,borderBottom:'1px solid #f8fafc' }}
+                  onMouseEnter={e=>e.currentTarget.style.background='#f8fafc'} onMouseLeave={e=>e.currentTarget.style.background='white'}>
+                  <div style={{ width:28,height:28,borderRadius:8,background:'#f0fdf4',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0 }}>
+                    <Download size={13} color="#16a34a"/>
+                  </div>
+                  <div>
+                    <div>Export CSV</div>
+                    <div style={{ fontSize:10,color:'#94a3b8',fontWeight:400 }}>Données brutes — {filtered.length} lignes</div>
+                  </div>
+                </button>
+                <button onClick={handleExportReport} style={{ display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 14px',background:'white',border:'none',fontFamily:'inherit',cursor:'pointer',textAlign:'left',fontSize:13,color:'#374151',fontWeight:600 }}
+                  onMouseEnter={e=>e.currentTarget.style.background='#f8fafc'} onMouseLeave={e=>e.currentTarget.style.background='white'}>
+                  <div style={{ width:28,height:28,borderRadius:8,background:'#eff6ff',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0 }}>
+                    <FileBarChart size={13} color="#2563EB"/>
+                  </div>
+                  <div>
+                    <div>Rapport détaillé HTML</div>
+                    <div style={{ fontSize:10,color:'#94a3b8',fontWeight:400 }}>KPIs · classements · évolution · détails</div>
+                  </div>
+                </button>
+              </div>
+            )}
+            {exportMenuOpen && <div onClick={()=>setExportMenuOpen(false)} style={{ position:'fixed',inset:0,zIndex:998 }}/>}
+          </div>
           <button onClick={loadData} style={{ display:'flex',alignItems:'center',gap:6,padding:'8px 16px',background:'#1B5E46',color:'white',border:'none',borderRadius:10,fontWeight:600,fontSize:12,cursor:'pointer',fontFamily:'inherit',boxShadow:'0 2px 8px rgba(27,94,70,.3)' }}>
             <RefreshCw size={13} className={loading?'spin':''}/> Actualiser
           </button>

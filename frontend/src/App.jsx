@@ -8,6 +8,7 @@ import Dashboard from './components/Dashboard/Dashboard';
 import Files from './components/Files/Files';
 import Costs from './components/Costs/Costs';
 import Devis from './components/Costs/Devis';
+import Anomalies from './components/Anomalies/Anomalies';
 import Resources from "./components/Resources/ResourceDashboard";
 import Settings from './pages/Settings';
 import LoadingSpinner from './components/Common/LoadingSpinner';
@@ -34,6 +35,7 @@ function AppRoutes() {
       <Route path="/files" element={<ProtectedRoute><Files /></ProtectedRoute>} />
       <Route path="/costs" element={<ProtectedRoute><Costs /></ProtectedRoute>} />
       <Route path="/Devis" element={<ProtectedRoute><Devis /></ProtectedRoute>} />
+      <Route path="/anomalies" element={<ProtectedRoute><Anomalies /></ProtectedRoute>} />
       <Route path="/resources" element={<ProtectedRoute><Resources /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="/" element={<Navigate to={isAuthenticated ? '/dashboard' : '/login'} />} />

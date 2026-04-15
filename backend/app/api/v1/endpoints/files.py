@@ -12,11 +12,12 @@ from app.database import get_db
 from app.schemas.file import File as FileModel, FileStatus, FileFormat
 from app.schemas.user import User
 from app.models.file import FileUploadResponse, FileListResponse
-from app.models.cost import CostRecord as CostDB          # SQLAlchemy model
-from app.schemas.cost import CostCreate                    # Pydantic schema
+from app.models.cost import CostRecord as CostDB  # SQLAlchemy model
+from app.schemas.cost import CostCreate  # Pydantic schema
 from app.services.file_parser import file_parser
 from app.services.cost_service import cost_service
-from app.services.cloud_fetcher import get_fetcher
+from app.services.resource_service import resource_service
+from app.services.cloud_fetcher import get_fetcher, get_resource_fetcher
 from app.dependencies import get_current_user
 from app.config import settings
 
@@ -27,46 +28,59 @@ router = APIRouter(prefix="/files", tags=["files"])
 # ==================== PYDANTIC SCHEMAS ====================
 
 class ApiCostRecord(BaseModel):
-    cost_date:     date
-    amount:        float
-    service_name:  str
-    currency:      str           = "EUR"
-    project_id:    Optional[str] = None
-    team_id:       Optional[str] = None
+    cost_date: date
+    amount: float
+    service_name: str
+    currency: str = "EUR"
+    project_id: Optional[str] = None
+    team_id: Optional[str] = None
     cost_category: Optional[str] = None
-    description:   Optional[str] = None  # input only, not passed to CostCreate
+    description: Optional[str] = None  # input only, not passed to CostCreate
 
 
 class ApiImportRequest(BaseModel):
     source_name: str
-    costs:       List[ApiCostRecord]
-    metadata:    Optional[Dict[str, Any]] = {}
+    costs: List[ApiCostRecord]
+    metadata: Optional[Dict[str, Any]] = {}
 
 
 class FetchAndImportRequest(BaseModel):
-    source_name:   str
-    auth_fields:   Dict[str, Any]
-    url:           Optional[str]            = None
-    method:        str                      = "GET"
-    start_date:    Optional[str]            = None
-    end_date:      Optional[str]            = None
+    source_name: str
+    auth_fields: Dict[str, Any]
+    url: Optional[str] = None
+    method: str = "GET"
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     extra_headers: Optional[Dict[str, Any]] = {}
-    metadata:      Optional[Dict[str, Any]] = {}
+    metadata: Optional[Dict[str, Any]] = {}
+
+
+class ImportOVHResourcesRequest(BaseModel):
+    """Request to import OVHcloud VPS/Dedicated metrics"""
+
+    app_key: str
+    app_secret: str
+    consumer_key: str
 
 
 # ==================== LIST FILES ====================
 
 @router.get("/", response_model=List[FileListResponse])
 def list_files(
-    skip:         int     = Query(0,   ge=0),
-    limit:        int     = Query(100, ge=1, le=500),
-    db:           Session = Depends(get_db),
-    current_user: User    = Depends(get_current_user)
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     logger.info(f"📋 Listing files for user {current_user.id}")
-    files = db.query(FileModel).filter(
-        FileModel.user_id == current_user.id
-    ).order_by(FileModel.created_at.desc()).offset(skip).limit(limit).all()
+    files = (
+        db.query(FileModel)
+        .filter(FileModel.user_id == current_user.id)
+        .order_by(FileModel.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     logger.info(f"✅ Found {len(files)} files")
     return files
 
@@ -75,9 +89,9 @@ def list_files(
 
 @router.post("/upload", response_model=FileUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_file(
-    file:         UploadFile = File(...),
-    db:           Session    = Depends(get_db),
-    current_user: User       = Depends(get_current_user)
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     logger.info(f"📤 Upload started by {current_user.email}")
     try:
@@ -85,11 +99,11 @@ async def upload_file(
             raise HTTPException(status_code=400, detail="No file provided")
 
         file_ext = file.filename.split(".")[-1].lower()
-        allowed  = ["xlsx", "xls", "csv", "pdf"]
+        allowed = ["xlsx", "xls", "csv", "pdf"]
         if file_ext not in allowed:
             raise HTTPException(
                 status_code=400,
-                detail=f"Format non supporté. Formats acceptés: {', '.join(allowed)}"
+                detail=f"Format non supporté. Formats acceptés: {', '.join(allowed)}",
             )
 
         try:
@@ -97,7 +111,7 @@ async def upload_file(
         except KeyError:
             raise HTTPException(status_code=400, detail="Format invalide")
 
-        contents  = await file.read()
+        contents = await file.read()
         file_size = len(contents)
 
         if file_size == 0:
@@ -106,26 +120,26 @@ async def upload_file(
             raise HTTPException(status_code=413, detail="Fichier trop grand (max 50MB)")
 
         file_hash = hashlib.sha256(contents).hexdigest()
-        existing  = db.query(FileModel).filter(FileModel.file_hash == file_hash).first()
+        existing = db.query(FileModel).filter(FileModel.file_hash == file_hash).first()
         if existing:
             logger.info(f"⚠️ Duplicate detected, returning existing ID={existing.id}")
             return existing
 
-        upload_dir    = Path(settings.upload_dir)
+        upload_dir = Path(settings.upload_dir)
         upload_dir.mkdir(parents=True, exist_ok=True)
         safe_filename = file.filename.replace(" ", "_").replace("/", "_")
-        file_path     = upload_dir / f"{file_hash[:8]}_{safe_filename}"
+        file_path = upload_dir / f"{file_hash[:8]}_{safe_filename}"
 
         with open(file_path, "wb") as f:
             f.write(contents)
 
         db_file = FileModel(
-            filename        = file.filename,
-            file_hash       = file_hash,
-            file_size_bytes = file_size,
-            file_format     = file_format_enum,
-            user_id         = current_user.id,
-            parse_status    = FileStatus.PENDING,
+            filename=file.filename,
+            file_hash=file_hash,
+            file_size_bytes=file_size,
+            file_format=file_format_enum,
+            user_id=current_user.id,
+            parse_status=FileStatus.PENDING,
         )
         db.add(db_file)
         db.commit()
@@ -145,16 +159,18 @@ async def upload_file(
 
 @router.post("/import-api", status_code=status.HTTP_201_CREATED)
 def import_via_api(
-    payload:      ApiImportRequest,
-    db:           Session = Depends(get_db),
-    current_user: User    = Depends(get_current_user)
+    payload: ApiImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Accept a pre-built list of cost records and save them directly."""
-    logger.info(f"🔌 API import by {current_user.email}: {len(payload.costs)} records from '{payload.source_name}'")
+    logger.info(
+        f"🔌 API import by {current_user.email}: {len(payload.costs)} records from '{payload.source_name}'"
+    )
     try:
         costs_created = 0
         costs_skipped = 0
-        errors        = []
+        errors = []
 
         for i, record in enumerate(payload.costs):
             try:
@@ -164,16 +180,16 @@ def import_via_api(
                     continue
 
                 cost_data = CostCreate(
-                    cost_date     = record.cost_date,
-                    amount        = record.amount,
-                    service_name  = record.service_name,
-                    currency      = record.currency,
-                    project_id    = record.project_id,
-                    team_id       = record.team_id,
-                    cost_category = record.cost_category,
-                    source        = payload.source_name,
-                    source_file   = None,
-                    reference     = None,
+                    cost_date=record.cost_date,
+                    amount=record.amount,
+                    service_name=record.service_name,
+                    currency=record.currency,
+                    project_id=record.project_id,
+                    team_id=record.team_id,
+                    cost_category=record.cost_category,
+                    source=payload.source_name,
+                    source_file=None,
+                    reference=None,
                 )
                 cost_service.create_cost(db, cost_data)
                 costs_created += 1
@@ -183,15 +199,17 @@ def import_via_api(
                 errors.append(f"Ligne {i+1}: {str(e)}")
                 logger.error(f"❌ Record {i+1} failed: {str(e)}", exc_info=True)
 
-        logger.info(f"✅ API import done: {costs_created} créés, {costs_skipped} ignorés")
+        logger.info(
+            f"✅ API import done: {costs_created} créés, {costs_skipped} ignorés"
+        )
         return {
-            "message":       f"Import API réussi depuis '{payload.source_name}'",
-            "source":        payload.source_name,
+            "message": f"Import API réussi depuis '{payload.source_name}'",
+            "source": payload.source_name,
             "costs_created": costs_created,
             "costs_skipped": costs_skipped,
-            "total_sent":    len(payload.costs),
-            "errors":        errors[:10],
-            "imported_at":   datetime.utcnow().isoformat(),
+            "total_sent": len(payload.costs),
+            "errors": errors[:10],
+            "imported_at": datetime.utcnow().isoformat(),
         }
 
     except Exception as e:
@@ -203,15 +221,15 @@ def import_via_api(
 
 @router.post("/test-connection", status_code=status.HTTP_200_OK)
 def test_connection(
-    payload:      FetchAndImportRequest,
-    db:           Session = Depends(get_db),
-    current_user: User    = Depends(get_current_user)
+    payload: FetchAndImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Test cloud API connectivity without importing anything."""
     logger.info(f"🔌 test-connection for '{payload.source_name}' by {current_user.email}")
     try:
         fetcher = get_fetcher(payload.source_name)
-        result  = fetcher.test_connection(payload.auth_fields)
+        result = fetcher.test_connection(payload.auth_fields)
         return result
     except Exception as e:
         logger.error(f"❌ test-connection error: {str(e)}", exc_info=True)
@@ -222,9 +240,9 @@ def test_connection(
 
 @router.post("/fetch-and-import", status_code=status.HTTP_201_CREATED)
 def fetch_and_import(
-    payload:      FetchAndImportRequest,
-    db:           Session = Depends(get_db),
-    current_user: User    = Depends(get_current_user)
+    payload: FetchAndImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Fetch costs directly from a cloud API (OVHcloud, AWS, Azure, GCP, Custom)
@@ -238,37 +256,47 @@ def fetch_and_import(
         try:
             if payload.source_name.lower() == "custom":
                 raw_costs = fetcher.fetch_costs(
-                    auth_fields   = payload.auth_fields,
-                    start_date    = payload.start_date,
-                    end_date      = payload.end_date,
-                    url           = payload.url,
-                    method        = payload.method,
-                    extra_headers = payload.extra_headers or {},
+                    auth_fields=payload.auth_fields,
+                    start_date=payload.start_date,
+                    end_date=payload.end_date,
+                    url=payload.url,
+                    method=payload.method,
+                    extra_headers=payload.extra_headers or {},
                 )
             else:
                 raw_costs = fetcher.fetch_costs(
-                    auth_fields = payload.auth_fields,
-                    start_date  = payload.start_date,
-                    end_date    = payload.end_date,
+                    auth_fields=payload.auth_fields,
+                    start_date=payload.start_date,
+                    end_date=payload.end_date,
                 )
         except NotImplementedError as e:
             raise HTTPException(status_code=501, detail=str(e))
+        except PermissionError as e:
+            # Raised by fetchers when the token lacks a specific OVH route permission
+            logger.warning(f"⛔ Permission denied fetching costs: {e}")
+            raise HTTPException(status_code=403, detail=str(e))
         except requests.exceptions.HTTPError as e:
             code = e.response.status_code if e.response is not None else 502
             if code == 403:
-                detail = "Accès refusé — vérifiez vos droits API (Consumer Key, permissions)"
+                detail = (
+                    "Accès refusé — le Consumer Key n'a pas les droits nécessaires. "
+                    "Recréez votre token sur eu.api.ovh.com/createToken "
+                    "en cochant GET /me/bill et GET /me/bill/*"
+                )
             elif code == 401:
                 detail = "Clés invalides ou expirées"
             else:
-                detail = f"Erreur API cloud {code}"
+                detail = f"Erreur API cloud {code}: {e}"
             raise HTTPException(status_code=502, detail=detail)
 
-        logger.info(f"📦 Fetched {len(raw_costs)} raw records from {payload.source_name}")
+        logger.info(
+            f"📦 Fetched {len(raw_costs)} raw records from {payload.source_name}"
+        )
 
         # ── 2. Save to DB ─────────────────────────────────────────
         costs_created = 0
         costs_skipped = 0
-        errors        = []
+        errors = []
 
         for i, record in enumerate(raw_costs):
             try:
@@ -278,14 +306,14 @@ def fetch_and_import(
                     continue
 
                 cost_data = CostCreate(
-                    cost_date     = record["cost_date"],
-                    amount        = amount,
-                    service_name  = record.get("service_name", payload.source_name),
-                    currency      = record.get("currency", "EUR"),
-                    cost_category = record.get("cost_category"),
-                    reference     = record.get("reference"),
-                    source        = payload.source_name,
-                    source_file   = None,
+                    cost_date=record["cost_date"],
+                    amount=amount,
+                    service_name=record.get("service_name", payload.source_name),
+                    currency=record.get("currency", "EUR"),
+                    cost_category=record.get("cost_category"),
+                    reference=record.get("reference"),
+                    source=payload.source_name,
+                    source_file=None,
                 )
                 cost_service.create_cost(db, cost_data)
                 costs_created += 1
@@ -295,15 +323,17 @@ def fetch_and_import(
                 errors.append(f"Record {i+1}: {str(e)}")
                 logger.error(f"❌ Record {i+1} failed: {str(e)}", exc_info=True)
 
-        logger.info(f"✅ fetch-and-import done: {costs_created} créés, {costs_skipped} ignorés")
+        logger.info(
+            f"✅ fetch-and-import done: {costs_created} créés, {costs_skipped} ignorés"
+        )
         return {
-            "message":       f"Import réussi depuis {payload.source_name}",
-            "source":        payload.source_name,
+            "message": f"Import réussi depuis {payload.source_name}",
+            "source": payload.source_name,
             "costs_created": costs_created,
             "costs_skipped": costs_skipped,
-            "total_sent":    len(raw_costs),
-            "errors":        errors[:10],
-            "imported_at":   datetime.utcnow().isoformat(),
+            "total_sent": len(raw_costs),
+            "errors": errors[:10],
+            "imported_at": datetime.utcnow().isoformat(),
         }
 
     except HTTPException:
@@ -313,19 +343,114 @@ def fetch_and_import(
         raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
 
 
+# ==================== IMPORT OVHcloud RESOURCES (NEW) ====================
+
+@router.post("/import-ovh-resources", status_code=status.HTTP_201_CREATED)
+def import_ovh_resources(
+    payload: ImportOVHResourcesRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Fetch CPU, RAM, Disk metrics from OVHcloud VPS and Dedicated servers
+    and save them to ResourceMetric table.
+    """
+    logger.info(f"📊 Importing OVHcloud resources for {current_user.email}")
+    try:
+        # Get OVH resource fetcher
+        fetcher = get_resource_fetcher("ovhcloud-resources")
+        if not fetcher:
+            raise HTTPException(
+                status_code=400,
+                detail="OVHcloud resource fetcher not available",
+            )
+
+        # Prepare auth fields
+        auth_fields = {
+            "app_key": payload.app_key,
+            "app_secret": payload.app_secret,
+            "consumer_key": payload.consumer_key,
+        }
+
+        # Test connection first
+        test_result = fetcher.test_connection(auth_fields)
+        if not test_result["success"]:
+            raise HTTPException(status_code=401, detail=test_result["message"])
+
+        # Fetch resource metrics
+        logger.info("📡 Fetching OVHcloud resource metrics...")
+        metrics_data = fetcher.fetch_resources(auth_fields)
+
+        if not metrics_data:
+            return {
+                "message": "Aucun serveur trouvé",
+                "metrics_created": 0,
+                "metrics_skipped": 0,
+                "total_sent": 0,
+                "errors": [],
+                "imported_at": datetime.utcnow().isoformat(),
+            }
+
+        # Save metrics to database
+        metrics_created = 0
+        metrics_skipped = 0
+        errors = []
+
+        for i, metric_data in enumerate(metrics_data):
+            try:
+                # Create ResourceMetricCreate from metric_data
+                from app.schemas.resource import ResourceMetricCreate
+
+                metric = ResourceMetricCreate(
+                    server_name=metric_data["server_name"],
+                    cpu_usage=metric_data["cpu_usage"],
+                    ram_usage=metric_data["ram_usage"],
+                    disk_usage=metric_data["disk_usage"],
+                    recorded_at=datetime.fromisoformat(metric_data["recorded_at"]),
+                )
+                resource_service.create_resource_metric(db, metric)
+                metrics_created += 1
+                logger.info(
+                    f"✅ Saved metric for {metric_data['server_name']}"
+                )
+
+            except Exception as e:
+                metrics_skipped += 1
+                errors.append(f"Server {i+1}: {str(e)}")
+                logger.error(f"❌ Metric {i+1} failed: {str(e)}", exc_info=True)
+
+        logger.info(
+            f"✅ OVH resources import done: {metrics_created} créés, {metrics_skipped} ignorés"
+        )
+        return {
+            "message": f"Import OVHcloud réussi",
+            "source": "OVHcloud",
+            "metrics_created": metrics_created,
+            "metrics_skipped": metrics_skipped,
+            "total_sent": len(metrics_data),
+            "errors": errors[:10],
+            "imported_at": datetime.utcnow().isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ OVH resources import error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
+
+
 # ==================== PARSE ====================
 
 @router.post("/{file_id}/parse")
 def parse_file(
-    file_id:      int,
-    db:           Session = Depends(get_db),
-    current_user: User    = Depends(get_current_user)
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Parse a file and extract costs — also stores official HT/TTC totals."""
     logger.info(f"⚙️ Parsing file {file_id}")
     db_file = db.query(FileModel).filter(
-        FileModel.id      == file_id,
-        FileModel.user_id == current_user.id
+        FileModel.id == file_id, FileModel.user_id == current_user.id
     ).first()
 
     if not db_file:
@@ -340,14 +465,15 @@ def parse_file(
 
         if isinstance(result, dict):
             if result.get("invoice_total_ht") is not None:
-                db_file.invoice_total_ht  = float(result["invoice_total_ht"])
+                db_file.invoice_total_ht = float(result["invoice_total_ht"])
             if result.get("invoice_total_ttc") is not None:
                 db_file.invoice_total_ttc = float(result["invoice_total_ttc"])
             if result.get("invoice_date") is not None:
                 try:
                     v = result["invoice_date"]
                     db_file.invoice_date = (
-                        v if isinstance(v, date)
+                        v
+                        if isinstance(v, date)
                         else datetime.fromisoformat(str(v)).date()
                     )
                 except Exception:
@@ -359,20 +485,34 @@ def parse_file(
         db.refresh(db_file)
         logger.info(f"✅ File {file_id} parsed: {result}")
         return {
-            "message":           "Fichier parsé avec succès",
-            "file_id":           file_id,
-            "costs_created":     result.get("costs_created",    0)    if isinstance(result, dict) else 0,
-            "rows_imported":     result.get("rows_imported",    0)    if isinstance(result, dict) else 0,
-            "rows_skipped":      result.get("rows_skipped",     0)    if isinstance(result, dict) else 0,
-            "invoice_total_ht":  result.get("invoice_total_ht", None) if isinstance(result, dict) else None,
-            "invoice_total_ttc": result.get("invoice_total_ttc",None) if isinstance(result, dict) else None,
-            "invoice_date":      str(result.get("invoice_date", None))if isinstance(result, dict) else None,
-            "invoice_reference": result.get("invoice_reference",None) if isinstance(result, dict) else None,
+            "message": "Fichier parsé avec succès",
+            "file_id": file_id,
+            "costs_created": result.get("costs_created", 0)
+            if isinstance(result, dict)
+            else 0,
+            "rows_imported": result.get("rows_imported", 0)
+            if isinstance(result, dict)
+            else 0,
+            "rows_skipped": result.get("rows_skipped", 0)
+            if isinstance(result, dict)
+            else 0,
+            "invoice_total_ht": result.get("invoice_total_ht", None)
+            if isinstance(result, dict)
+            else None,
+            "invoice_total_ttc": result.get("invoice_total_ttc", None)
+            if isinstance(result, dict)
+            else None,
+            "invoice_date": str(result.get("invoice_date", None))
+            if isinstance(result, dict)
+            else None,
+            "invoice_reference": result.get("invoice_reference", None)
+            if isinstance(result, dict)
+            else None,
         }
 
     except Exception as e:
         db_file.parse_status = FileStatus.FAILED
-        db_file.parse_error  = str(e)[:500]
+        db_file.parse_error = str(e)[:500]
         db.commit()
         logger.error(f"❌ Parse error for file {file_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Parse failed: {str(e)}")
@@ -382,13 +522,12 @@ def parse_file(
 
 @router.delete("/{file_id}")
 def delete_file(
-    file_id:      int,
-    db:           Session = Depends(get_db),
-    current_user: User    = Depends(get_current_user)
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     db_file = db.query(FileModel).filter(
-        FileModel.id      == file_id,
-        FileModel.user_id == current_user.id
+        FileModel.id == file_id, FileModel.user_id == current_user.id
     ).first()
 
     if not db_file:

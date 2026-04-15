@@ -37,6 +37,11 @@ def init_db():
     """Initialize database"""
     logger.info("Creating database tables...")
     from app.schemas.base import Base
+    import app.schemas.user  # Importer tous les modèles pour que Base les connaisse
+    import app.schemas.file # Importer tous les modèles pour que Base les connaisse
+    import app.models.cost  # Importer tous les modèles pour que Base les connaisse
+    import app.models.resource  # Importer tous les modèles pour que Base les connaisse 
+    import app.models.anomaly  # Importer tous les modèles pour que Base les connaisse    
     Base.metadata.create_all(bind=engine)
     logger.info("✅ Database initialized")
 

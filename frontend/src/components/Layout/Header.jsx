@@ -9,6 +9,7 @@ const TITLES = {
   '/costs':     { title: 'Coûts',              sub: 'Gérez vos dépenses cloud'           },
   '/Devis':     { title: 'Devis',              sub: 'Gérez vos devis'                    },
   '/resources': { title: 'Ressources',         sub: 'Gérez vos ressources cloud'         },
+  '/anomalies': { title: 'Anomalies',         sub: 'Surveillez les anomalies de coûts'  },
   '/settings':  { title: 'Paramètres',         sub: "Configuration de l'application"    },
 };
 

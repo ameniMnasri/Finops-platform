@@ -86,10 +86,14 @@ const API_PRESETS = [
     docsUrl: 'https://api.ovh.com/console/',
     description: 'OVHcloud — Factures, Public Cloud, consommation',
     endpoints: [
-      { label: 'Factures',            value: 'https://eu.api.ovh.com/1.0/me/bill' },
-      { label: 'Public Cloud Budget', value: 'https://eu.api.ovh.com/1.0/cloud/project/{projectId}/bill' },
-      { label: 'Public Cloud Usage',  value: 'https://eu.api.ovh.com/1.0/cloud/project/{projectId}/usage/current' },
-      { label: 'Consommation totale', value: 'https://eu.api.ovh.com/1.0/me/consumption' },
+      { label: 'Factures',            value: 'https://eu.api.ovh.com/1.0/me/bill',                                     group: 'billing' },
+      { label: 'Public Cloud Budget', value: 'https://eu.api.ovh.com/1.0/cloud/project/{projectId}/bill',              group: 'billing' },
+      { label: 'Public Cloud Usage',  value: 'https://eu.api.ovh.com/1.0/cloud/project/{projectId}/usage/current',     group: 'billing' },
+      { label: 'Consommation totale', value: 'https://eu.api.ovh.com/1.0/me/consumption',                              group: 'billing' },
+      { label: 'VPS — Liste',         value: 'https://eu.api.ovh.com/1.0/vps',                                         group: 'resources' },
+      { label: 'VPS — Métriques',     value: 'https://eu.api.ovh.com/1.0/vps/{vpsName}/use?type=cpu',                  group: 'resources' },
+      { label: 'Dedicated — Liste',   value: 'https://eu.api.ovh.com/1.0/dedicated/server',                            group: 'resources' },
+      { label: 'Dedicated — Stats',   value: 'https://eu.api.ovh.com/1.0/dedicated/server/{serverName}/statistics?period=hourly&type=cpu', group: 'resources' },
     ],
     fields: [
       { key: 'app_key',      label: 'Application Key',    type: 'text',     placeholder: 'xxxxxxxxxxx',            hint: 'Générer sur eu.api.ovh.com/createToken' },
@@ -173,15 +177,21 @@ const API_PRESETS = [
 // ── INLINE RESOURCE MONITORING PANEL (OVH only) ──────────────────────
 // ══════════════════════════════════════════════════════════════════════
 
-// Detect server type from name
+// Detect server type from name (OVH patterns)
 function detectType(name = '') {
+  // ns<digits>.ip-<...>.eu/net or ns<digits>.ovh.net → Dedicated
+  if (/^ns\d+\.(ip-[\d-]+\.(eu|net)|ovh\.net)$/i.test(name)) return 'Dedicated';
+  // vps* → VPS
+  if (/^vps/i.test(name)) return 'VPS';
+  // keyword fallback
   if (/DEDICATED|DATABASE|EG-|ADVANCE|RISE|BIG-|SP-|HG-|SCALE-|KS-|SYS-|DEDIBOX|SERVER/i.test(name))
     return 'Dedicated';
   return 'VPS';
 }
 
-// FinOps status logic
+// FinOps status logic — null means OVH removed CPU monitoring
 function calcStatus(avgCpu, peakCpu) {
+  if (avgCpu == null || peakCpu == null) return 'underutilized';
   if (avgCpu < 10 && peakCpu < 20) return 'underutilized';
   if (avgCpu > 75 || peakCpu > 90) return 'critical';
   return 'optimized';
@@ -193,18 +203,23 @@ const RESOURCE_STATUS = {
   critical:     { color: '#dc2626', bg: '#fff5f5', label: 'Critique',     icon: AlertCircle },
 };
 
-// Mini usage bar
-function MiniBar({ value, max = 100, color }) {
+// Mini usage bar / plain value
+function MiniBar({ value, max = 100, color, unit }) {
   const pct = Math.min((value / max) * 100, 100);
-  const c = value < 10 ? '#d97706' : value > 85 ? '#dc2626' : color;
+  const c = max === 100
+    ? (value < 10 ? '#d97706' : value > 85 ? '#dc2626' : color)
+    : color;
+  const displayUnit = unit || (max === 100 ? '%' : ' GB');
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 100 }}>
-      <div style={{ flex: 1, height: 5, background: '#e2e8f0', borderRadius: 99, overflow: 'hidden' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 90 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
+          {value.toFixed(1)}<span style={{ fontSize: 10, color: '#94a3b8', fontWeight: 400, marginLeft: 1 }}>{displayUnit}</span>
+        </span>
+      </div>
+      <div style={{ height: 4, borderRadius: 99, background: '#f1f5f9', overflow: 'hidden' }}>
         <div style={{ width: `${pct}%`, height: '100%', background: c, borderRadius: 99, transition: 'width .5s ease' }} />
       </div>
-      <span style={{ fontSize: 11, fontWeight: 700, color: c, minWidth: 34, textAlign: 'right' }}>
-        {value.toFixed(1)}{max === 100 ? '%' : ' G'}
-      </span>
     </div>
   );
 }
@@ -467,21 +482,7 @@ function OVHResourcePanel() {
                   }}
                 />
               </div>
-              {['all', 'optimized', 'underutilized', 'critical'].map(s => {
-                const labels = { all: 'Tous', optimized: '✅ Optimisé', underutilized: '⚠️ Sous-utilisé', critical: '🔴 Critique' };
-                const colors = { all: '#2563eb', optimized: '#16a34a', underutilized: '#d97706', critical: '#dc2626' };
-                const bgs    = { all: '#eff6ff', optimized: '#f0fdf4', underutilized: '#fffbeb', critical: '#fff5f5' };
-                return (
-                  <button key={s} onClick={() => setStatusFilter(s)} style={{
-                    padding: '6px 12px', borderRadius: 8, border: `1.5px solid ${statusFilter===s ? colors[s] : '#e2e8f0'}`,
-                    background: statusFilter===s ? bgs[s] : 'white',
-                    color: statusFilter===s ? colors[s] : '#64748b',
-                    fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
-                  }}>
-                    {labels[s]}
-                  </button>
-                );
-              })}
+
             </div>
 
             {loading ? (
@@ -503,7 +504,7 @@ function OVHResourcePanel() {
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
                     <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
-                      {['Serveur', 'Type', 'CPU Moy', 'CPU Pic', 'RAM Moy', 'Disque Moy', 'Statut', ''].map(h => (
+                      {['Serveur', 'Type', 'RAM Moy', 'Disque Moy', 'Recommandation', ''].map(h => (
                         <th key={h} style={{ padding: '9px 12px', textAlign: 'left', fontSize: 10, fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.07em', whiteSpace: 'nowrap' }}>{h}</th>
                       ))}
                     </tr>
@@ -536,21 +537,41 @@ function OVHResourcePanel() {
                               color:      s.server_type === 'Dedicated' ? '#7c3aed' : '#2563eb',
                             }}>{s.server_type}</span>
                           </td>
+                          {/* RAM Moy — plain GB + cap */}
                           <td style={{ padding: '10px 12px' }}>
-                            <MiniBar value={s.avg_cpu || 0} max={100} color="#2563eb" />
+                            <div style={{ fontWeight: 700, fontSize: 13, color: '#0f172a' }}>
+                              {(s.avg_ram || 0).toFixed(1)} <span style={{ fontSize: 10, color: '#94a3b8', fontWeight: 400 }}>GB</span>
+                            </div>
+                            <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>
+                              cap <strong style={{ color: '#64748b' }}>{(s.peak_ram || 0).toFixed(0)} GB</strong>
+                            </div>
                           </td>
+                          {/* Disque Moy — plain GB + cap */}
                           <td style={{ padding: '10px 12px' }}>
-                            <MiniBar value={s.peak_cpu || 0} max={100} color="#dc2626" />
+                            <div style={{ fontWeight: 700, fontSize: 13, color: '#0f172a' }}>
+                              {(s.avg_disk || 0).toFixed(1)} <span style={{ fontSize: 10, color: '#94a3b8', fontWeight: 400 }}>GB</span>
+                            </div>
+                            <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>
+                              cap <strong style={{ color: '#64748b' }}>{(s.peak_disk || 0).toFixed(0)} GB</strong>
+                            </div>
                           </td>
+                          {/* Recommandation — ↓ Downsize / ↑ Upsize / ✓ Optimal */}
                           <td style={{ padding: '10px 12px' }}>
-                            <MiniBar value={s.avg_ram || 0} max={64} color="#7c3aed" />
+                            {s.status === 'underutilized' ? (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700, background: '#fef3c7', color: '#b45309', border: '1px solid #fcd34d' }}>
+                                ↓ Downsize
+                              </span>
+                            ) : s.status === 'critical' ? (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700, background: '#fee2e2', color: '#dc2626', border: '1px solid #fca5a5' }}>
+                                ↑ Upsize
+                              </span>
+                            ) : (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700, background: '#f0fdf4', color: '#16a34a', border: '1px solid #86efac' }}>
+                                ✓ Optimal
+                              </span>
+                            )}
                           </td>
-                          <td style={{ padding: '10px 12px' }}>
-                            <MiniBar value={s.avg_disk || 0} max={1024} color="#ea580c" />
-                          </td>
-                          <td style={{ padding: '10px 12px' }}>
-                            <ResBadge status={s.status} />
-                          </td>
+                          {/* Graphique button */}
                           <td style={{ padding: '10px 12px' }}>
                             <button
                               onClick={e => { e.stopPropagation(); setSelectedSrv(s); setResTab('charts'); }}
@@ -560,7 +581,7 @@ function OVHResourcePanel() {
                                 color: '#2563eb', fontSize: 10, fontWeight: 700, cursor: 'pointer',
                               }}
                             >
-                              Graphique →
+                              Graphiques →
                             </button>
                           </td>
                         </tr>
@@ -619,16 +640,32 @@ function OVHResourcePanel() {
                 <p style={{ fontSize: 12 }}>Chargement des données…</p>
               </div>
             ) : timeSeries.length === 0 ? (
-              <div style={{
-                padding: '20px', background: '#fffbeb', border: '1px solid #fcd34d',
-                borderRadius: 10, textAlign: 'center',
-              }}>
-                <p style={{ fontSize: 12, fontWeight: 700, color: '#92400e', marginBottom: 4 }}>
-                  Aucune donnée de série temporelle disponible
-                </p>
-                <p style={{ fontSize: 11, color: '#b45309' }}>
-                  Configurez le collecteur OVH pour enregistrer les métriques automatiquement.
-                </p>
+              <div>
+                <div style={{ padding: '12px 16px', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 10, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <AlertCircle size={14} color="#d97706" style={{ flexShrink: 0 }} />
+                  <p style={{ fontSize: 12, color: '#92400e' }}>
+                    <strong>Pas de métriques temps-réel</strong> — OVH a supprimé les endpoints de monitoring (sept. 2024). Specs matérielles affichées.
+                  </p>
+                </div>
+                {selectedSrv && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px,1fr))', gap: 10 }}>
+                    {[
+                      { label: 'RAM allouée', value: selectedSrv.avg_ram, unit: 'GB', color: '#7c3aed', bg: '#f5f3ff', icon: '🧠' },
+                      { label: 'RAM cap',     value: selectedSrv.peak_ram, unit: 'GB', color: '#2563eb', bg: '#eff6ff', icon: '📦' },
+                      { label: 'Disque alloué', value: selectedSrv.avg_disk, unit: 'GB', color: '#ea580c', bg: '#fff7ed', icon: '💾' },
+                      { label: 'Disque cap',    value: selectedSrv.peak_disk, unit: 'GB', color: '#16a34a', bg: '#f0fdf4', icon: '🗄️' },
+                    ].map(c => (
+                      <div key={c.label} style={{ background: c.bg, border: `1px solid ${c.color}22`, borderRadius: 12, padding: '16px', textAlign: 'center' }}>
+                        <div style={{ fontSize: 24, marginBottom: 6 }}>{c.icon}</div>
+                        <p style={{ fontSize: 9, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{c.label}</p>
+                        <p style={{ fontSize: 26, fontWeight: 900, color: c.color, lineHeight: 1 }}>
+                          {c.value != null ? Number(c.value).toFixed(1) : '—'}
+                        </p>
+                        <p style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>{c.unit}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px,1fr))', gap: 10 }}>
@@ -949,12 +986,19 @@ export default function Files() {
   const [endDate,        setEndDate]        = useState(new Date().toISOString().split('T')[0]);
   const [extraHeaders,   setExtraHeaders]   = useState('');
   const [showAdvanced,   setShowAdvanced]   = useState(false);
-  const [testing,        setTesting]        = useState(false);
-  const [importing,      setImporting]      = useState(false);
-  const [testResult,     setTestResult]     = useState(null);
-  const [importResult,   setImportResult]   = useState(null);
+  const [testing,           setTesting]           = useState(false);
+  const [importing,         setImporting]         = useState(false);
+  const [importingResources,setImportingResources] = useState(false);
+  const [resourceResult,    setResourceResult]    = useState(null);
+  const [testResult,        setTestResult]        = useState(null);
+  const [importResult,      setImportResult]      = useState(null);
 
   const preset = API_PRESETS.find(p => p.id === selectedPreset);
+
+  // True when the selected OVH endpoint belongs to the resources group
+  const isResourceEndpoint =
+    selectedPreset === 'ovh' &&
+    preset?.endpoints?.find(ep => ep.value === apiUrl)?.group === 'resources';
 
   const loadFiles = useCallback(async () => {
     try {
@@ -1070,18 +1114,55 @@ export default function Files() {
 
   const handleTest = async () => {
     if (!apiUrl) { toast.error('URL requise'); return; }
+
+    // For resource endpoints, test via the resources API (checks /vps + /dedicated/server)
+    if (isResourceEndpoint) {
+      try {
+        setTesting(true); setTestResult(null);
+        toast.loading('Test de connexion ressources...', { id: 'test' });
+        const res = await api.post('/resources/import-ovh-metrics', {
+          auth_fields: apiFields,
+          dry_run: true,          // flag handled gracefully — endpoint ignores unknown fields
+        });
+        const d = res.data;
+        setTestResult({
+          success: true,
+          message: `✅ ${d.servers_found ?? 0} serveur(s) trouvé(s) — ${d.metrics_created ?? 0} métrique(s) enregistrée(s)`,
+          records: d.servers_found ?? 0,
+        });
+        toast.success('Connexion ressources réussie !', { id: 'test' });
+      } catch (e) {
+        const msg = e?.response?.data?.detail || e.message;
+        setTestResult({ success: false, message: msg });
+        toast.error('Connexion échouée', { id: 'test' });
+      } finally {
+        setTesting(false);
+      }
+      return;
+    }
+
     try {
       setTesting(true); setTestResult(null);
       toast.loading('Test de connexion...', { id: 'test' });
       let parsedHeaders = {};
       try { if (extraHeaders.trim()) parsedHeaders = JSON.parse(extraHeaders); } catch {}
-      await api.post('/files/test-connection', {
+      const res = await api.post('/files/test-connection', {
         source_name: preset.name, costs: [], metadata: { test: true },
         auth_fields: apiFields, url: apiUrl, method: httpMethod,
         start_date: startDate, end_date: endDate, extra_headers: parsedHeaders,
       });
-      setTestResult({ success: true, message: 'Endpoint accessible', records: 0 });
-      toast.success('Connexion réussie !', { id: 'test' });
+      // Backend returns { success, message, records_found } — use that directly
+      const result = res.data;
+      setTestResult({
+        success: result.success,
+        message: result.message,
+        records: result.records_found ?? 0,
+      });
+      if (result.success) {
+        toast.success('Connexion réussie !', { id: 'test' });
+      } else {
+        toast.error('Permissions insuffisantes', { id: 'test' });
+      }
     } catch (e) {
       const msg = e?.response?.data?.detail || e.message;
       setTestResult({ success: false, message: msg });
@@ -1091,7 +1172,30 @@ export default function Files() {
     }
   };
 
+  const handleImportResources = async () => {
+    try {
+      setImportingResources(true); setResourceResult(null);
+      toast.loading('Collecte des métriques OVH...', { id: 'res-import' });
+      const res = await api.post('/resources/import-ovh-metrics', {
+        auth_fields: apiFields,
+      });
+      setResourceResult(res.data);
+      toast.success(`✅ ${res.data.imported ?? res.data.metrics_created ?? 0} métriques collectées !`, { id: 'res-import' });
+    } catch (e) {
+      const detail = e?.response?.data?.detail || e.message;
+      setResourceResult({ error: detail });
+      toast.error('Erreur collecte: ' + detail, { id: 'res-import', duration: 6000 });
+    } finally {
+      setImportingResources(false);
+    }
+  };
+
   const handleApiImport = async () => {
+    // When a resource endpoint is selected, delegate to the resource import
+    if (isResourceEndpoint) {
+      await handleImportResources();
+      return;
+    }
     if (!apiUrl) { toast.error('URL requise'); return; }
     try {
       setImporting(true); setImportResult(null);
@@ -1107,7 +1211,17 @@ export default function Files() {
       toast.success(`✅ ${res.data.costs_created} coûts importés !`, { id: 'api-import' });
       await loadFiles(); await loadFileCosts();
     } catch (e) {
-      toast.error('Erreur: ' + (e?.response?.data?.detail || e.message), { id: 'api-import' });
+      // Show the exact API error message (includes token permission instructions)
+      const detail = e?.response?.data?.detail || e.message;
+      const status = e?.response?.status;
+      if (status === 403) {
+        setImportResult(null);
+        // Surface the 403 detail as a visible error block (not just a toast)
+        setTestResult({ success: false, message: detail });
+        toast.error('Droits insuffisants — voir le message ci-dessous', { id: 'api-import', duration: 6000 });
+      } else {
+        toast.error('Erreur: ' + detail, { id: 'api-import', duration: 6000 });
+      }
     } finally {
       setImporting(false);
     }
@@ -1303,22 +1417,78 @@ export default function Files() {
                     <label style={{ fontSize: 12, fontWeight: 700, color: '#374151', display: 'block', marginBottom: 8 }}>
                       Endpoints disponibles
                     </label>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                      {preset.endpoints.map(ep => {
-                        const isActive = apiUrl === ep.value;
-                        return (
-                          <button key={ep.value} onClick={() => setApiUrl(ep.value)} style={{
-                            padding: '7px 14px', borderRadius: 9, fontFamily: 'inherit',
-                            border: `1.5px solid ${isActive ? preset.color : '#e2e8f0'}`,
-                            background: isActive ? preset.color + '12' : 'white',
-                            color: isActive ? preset.color : '#374151',
-                            fontSize: 12, fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
-                          }}>
-                            {isActive && '✓ '}{ep.label}
-                          </button>
-                        );
-                      })}
-                    </div>
+
+                    {/* Billing endpoints */}
+                    {selectedPreset === 'ovh' && (
+                      <div style={{ marginBottom: 8 }}>
+                        <span style={{
+                          fontSize: 10, fontWeight: 800, color: '#0369a1', textTransform: 'uppercase',
+                          letterSpacing: '.07em', display: 'block', marginBottom: 6,
+                        }}>💰 Facturation</span>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                          {preset.endpoints.filter(ep => ep.group === 'billing').map(ep => {
+                            const isActive = apiUrl === ep.value;
+                            return (
+                              <button key={ep.value} onClick={() => setApiUrl(ep.value)} style={{
+                                padding: '7px 14px', borderRadius: 9, fontFamily: 'inherit',
+                                border: `1.5px solid ${isActive ? preset.color : '#e2e8f0'}`,
+                                background: isActive ? preset.color + '12' : 'white',
+                                color: isActive ? preset.color : '#374151',
+                                fontSize: 12, fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
+                              }}>
+                                {isActive && '✓ '}{ep.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Resource endpoints (OVH only) */}
+                    {selectedPreset === 'ovh' && (
+                      <div>
+                        <span style={{
+                          fontSize: 10, fontWeight: 800, color: '#7c3aed', textTransform: 'uppercase',
+                          letterSpacing: '.07em', display: 'block', marginBottom: 6,
+                        }}>🖥️ Ressources (VPS &amp; Dédié)</span>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                          {preset.endpoints.filter(ep => ep.group === 'resources').map(ep => {
+                            const isActive = apiUrl === ep.value;
+                            return (
+                              <button key={ep.value} onClick={() => setApiUrl(ep.value)} style={{
+                                padding: '7px 14px', borderRadius: 9, fontFamily: 'inherit',
+                                border: `1.5px solid ${isActive ? '#7c3aed' : '#e2e8f0'}`,
+                                background: isActive ? '#f3eeff' : 'white',
+                                color: isActive ? '#7c3aed' : '#374151',
+                                fontSize: 12, fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
+                              }}>
+                                {isActive && '✓ '}{ep.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Non-OVH: flat list */}
+                    {selectedPreset !== 'ovh' && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                        {preset.endpoints.map(ep => {
+                          const isActive = apiUrl === ep.value;
+                          return (
+                            <button key={ep.value} onClick={() => setApiUrl(ep.value)} style={{
+                              padding: '7px 14px', borderRadius: 9, fontFamily: 'inherit',
+                              border: `1.5px solid ${isActive ? preset.color : '#e2e8f0'}`,
+                              background: isActive ? preset.color + '12' : 'white',
+                              color: isActive ? preset.color : '#374151',
+                              fontSize: 12, fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
+                            }}>
+                              {isActive && '✓ '}{ep.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1384,6 +1554,86 @@ export default function Files() {
                         <Key size={13} /> Créer un token
                       </a>
                     </div>
+
+                    {/* ── Resource import button ── */}
+                    <div style={{
+                      padding: '14px 16px', background: '#f5f3ff', borderRadius: 11,
+                      border: '1px solid #c4b5fd', display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14,
+                    }}>
+                      <div style={{ flex: 1 }}>
+                        <p style={{ fontSize: 12, fontWeight: 700, color: '#5b21b6', marginBottom: 2 }}>
+                          Collecte des métriques VPS &amp; Dédié
+                        </p>
+                        <p style={{ fontSize: 11, color: '#7c3aed' }}>
+                          Récupère CPU, RAM et Disque en temps réel pour tous vos serveurs OVH.
+                          Droits requis : <code style={{ background: '#ede9fe', padding: '1px 5px', borderRadius: 4, fontSize: 10 }}>GET /vps/*</code>{' '}
+                          <code style={{ background: '#ede9fe', padding: '1px 5px', borderRadius: 4, fontSize: 10 }}>GET /dedicated/server/*</code>
+                        </p>
+                      </div>
+                      <button
+                        onClick={handleImportResources}
+                        disabled={importingResources}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 7, padding: '9px 18px',
+                          background: importingResources ? '#94a3b8' : '#7c3aed',
+                          color: 'white', border: 'none', borderRadius: 9,
+                          fontSize: 12, fontWeight: 700, cursor: importingResources ? 'not-allowed' : 'pointer',
+                          fontFamily: 'inherit', flexShrink: 0, whiteSpace: 'nowrap',
+                          boxShadow: importingResources ? 'none' : '0 4px 12px rgba(124,58,237,.3)',
+                          transition: 'all .15s',
+                        }}
+                      >
+                        <Server size={13} className={importingResources ? 'spin' : ''} />
+                        {importingResources ? 'Collecte...' : 'Importer métriques ressources'}
+                      </button>
+                    </div>
+
+                    {/* Resource import result */}
+                    {resourceResult && (
+                      <div className="fade-in" style={{
+                        marginBottom: 14, borderRadius: 11, padding: '12px 16px',
+                        background: resourceResult.error ? '#fff5f5' : '#f5f3ff',
+                        border: `1px solid ${resourceResult.error ? '#fca5a5' : '#c4b5fd'}`,
+                        display: 'flex', alignItems: 'flex-start', gap: 10,
+                      }}>
+                        {resourceResult.error
+                          ? <XCircle size={16} color="#dc2626" style={{ flexShrink: 0, marginTop: 1 }} />
+                          : <CheckCircle size={16} color="#7c3aed" style={{ flexShrink: 0, marginTop: 1 }} />}
+                        <div>
+                          {resourceResult.error ? (
+                            <>
+                              <p style={{ fontSize: 12, fontWeight: 700, color: '#991b1b', marginBottom: 2 }}>Erreur de collecte</p>
+                              <p style={{ fontSize: 11, color: '#dc2626' }}>{resourceResult.error}</p>
+                            </>
+                          ) : (
+                            <>
+                              <p style={{ fontSize: 12, fontWeight: 700, color: '#5b21b6', marginBottom: 4 }}>
+                                ✅ Métriques collectées avec succès
+                              </p>
+                              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                                {[
+                                  { label: 'Serveurs trouvés',   val: resourceResult.servers_found   ?? '—' },
+                                  { label: 'Métriques créées',   val: resourceResult.metrics_created ?? resourceResult.imported ?? '—' },
+                                  { label: 'Erreurs',            val: resourceResult.errors?.length  ?? 0 },
+                                ].map(s => (
+                                  <div key={s.label} style={{ textAlign: 'center' }}>
+                                    <p style={{ fontSize: 18, fontWeight: 900, color: '#5b21b6', lineHeight: 1 }}>{s.val}</p>
+                                    <p style={{ fontSize: 10, color: '#7c3aed', fontWeight: 600 }}>{s.label}</p>
+                                  </div>
+                                ))}
+                              </div>
+                              {resourceResult.errors?.length > 0 && (
+                                <div style={{ marginTop: 8 }}>
+                                  {resourceResult.errors.slice(0, 3).map((err, i) => (
+                                    <p key={i} style={{ fontSize: 10, color: '#b91c1c' }}>• {err}</p>
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
                     {/* ══ INLINE RESOURCE MONITORING PANEL ══ */}
                     <OVHResourcePanel />

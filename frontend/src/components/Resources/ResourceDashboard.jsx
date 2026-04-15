@@ -1,29 +1,27 @@
-// ResourceDashboard.jsx — Real API data (no Math.random)
-import { useState, useEffect, useCallback, useRef } from 'react';
+// ResourceDashboard.jsx — Enhanced FinOps Dashboard with Rightsizing + Dates
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
-  Server, Search, RefreshCw, BarChart2, Zap, Activity, TrendingUp,
+  Server, Search, RefreshCw, BarChart2, Zap, Activity,
   ChevronUp, ChevronDown, Cpu, HardDrive, MemoryStick,
-  AlertTriangle, AlertCircle, CheckCircle,
+  AlertTriangle, AlertCircle, CheckCircle, DollarSign,
+  TrendingDown, TrendingUp, Layers, Eye, Target, Calendar,
+  ArrowDownCircle, ArrowUpCircle, Clock, Repeat,
 } from 'lucide-react';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer,
+  LineChart, Line, BarChart, Bar, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ResponsiveContainer, ReferenceLine, PieChart, Pie,
 } from 'recharts';
 import Header  from '../Layout/Header';
 import Sidebar from '../Layout/Sidebar';
-import { costsService } from '../../services/costs';
 import api from '../../services/api';
-
-const fmt2 = v =>
-  Number(v || 0).toLocaleString('fr-FR', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
 
 // ─── Category detection ────────────────────────────────────────────────────
 function detectServerCategory(name) {
   if (!name) return 'VPS';
   const n = name.toUpperCase();
+  if (/^NS\d+\.(IP-[\d-]+\.(EU|NET)|OVH\.NET)$/i.test(name)) return 'Dedicated';
+  if (/^VPS/i.test(name)) return 'VPS';
   if (
     n.includes('DEDICATED') || n.includes('DATABASE') ||
     n.includes('EG-')       || n.includes('ADVANCE')  ||
@@ -38,17 +36,86 @@ function detectServerCategory(name) {
 }
 
 function calculateStatus(avgCpu, peakCpu) {
+  if (avgCpu === null || peakCpu === null) return 'underutilized';
   if (avgCpu < 10 && peakCpu < 20) return 'underutilized';
   if (avgCpu > 75 || peakCpu > 90) return 'critical';
   return 'optimized';
 }
 
+// ─── Fuzzy key for cost matching ──────────────────────────────────────────
+function fuzzyKey(name) {
+  if (!name) return '';
+  return name.toLowerCase().replace(/\s+/g, '').replace(/[^a-z0-9]/g, '');
+}
+
+// ─── Rightsizing logic ─────────────────────────────────────────────────────
+// Returns a concrete rightsizing recommendation with tier suggestion and savings
+function computeRightsizing(server) {
+  const { avgCpu, peakCpu, avgRam, peakRam, invoiceRamGb, avgDisk, invoiceDiskGb, monthlyCost, status, type } = server;
+
+  // OVH VPS tiers (RAM GB → typical monthly €)
+  const VPS_TIERS = [
+    { ram: 2,   disk: 20,  price: 3.99,  label: 'VPS Starter 2GB' },
+    { ram: 4,   disk: 40,  price: 7.49,  label: 'VPS Value 4GB' },
+    { ram: 8,   disk: 80,  price: 13.99, label: 'VPS Essential 8GB' },
+    { ram: 16,  disk: 160, price: 26.99, label: 'VPS Comfort 16GB' },
+    { ram: 32,  disk: 320, price: 52.99, label: 'VPS Elite 32GB' },
+  ];
+
+  const DEDICATED_TIERS = [
+    { ram: 16,  price: 45,  label: 'KS-1 / Kimsufi 16GB' },
+    { ram: 32,  price: 70,  label: 'RISE-1 32GB' },
+    { ram: 64,  price: 110, label: 'ADVANCE-1 64GB' },
+    { ram: 128, price: 170, label: 'ADVANCE-4 128GB' },
+    { ram: 256, price: 280, label: 'SCALE-3 256GB' },
+  ];
+
+  const tiers = type === 'VPS' ? VPS_TIERS : DEDICATED_TIERS;
+  const currentRam = invoiceRamGb || peakRam || 0;
+  const currentDisk = invoiceDiskGb || peakRam || 0;
+
+  let recommendation = null;
+  let savingsEst = null;
+  let targetLabel = null;
+  let targetRam = null;
+  let reason = null;
+
+  if (status === 'underutilized' && currentRam > 0) {
+    // Find the smallest tier that still covers actual usage (with 20% headroom)
+    const neededRam = Math.max((avgRam || 0) * 1.2, (peakRam || 0) * 1.1, 2);
+    const neededDisk = Math.max((avgDisk || 0) * 1.15, 20);
+    const suitable = tiers.filter(t => t.ram >= neededRam && (t.disk === undefined || t.disk >= neededDisk));
+    const best = suitable.length > 0 ? suitable[0] : null;
+
+    if (best && best.ram < currentRam) {
+      targetLabel = best.label;
+      targetRam = best.ram;
+      if (monthlyCost && best.price) {
+        savingsEst = Math.max(0, monthlyCost - best.price);
+      }
+      reason = `CPU moy ${avgCpu !== null ? avgCpu.toFixed(1) + '%' : 'N/A'}, RAM utilisée ${avgRam > 0 ? avgRam.toFixed(1) + ' GB' : 'N/A'} sur ${currentRam} GB provisionné`;
+      recommendation = 'downsize';
+    }
+  } else if (status === 'critical') {
+    const neededRam = (peakRam || currentRam) * 1.5;
+    const suitable = tiers.filter(t => t.ram >= neededRam);
+    const best = suitable.length > 0 ? suitable[0] : null;
+    if (best) {
+      targetLabel = best.label;
+      targetRam = best.ram;
+      if (monthlyCost && best.price) {
+        savingsEst = best.price - monthlyCost; // cost increase
+      }
+      reason = `CPU picm ${peakCpu !== null ? peakCpu.toFixed(1) + '%' : 'N/A'} — risque de saturation`;
+      recommendation = 'upsize';
+    }
+  }
+
+  return { recommendation, targetLabel, targetRam, savingsEst, reason, currentRam };
+}
+
 // ─── Real API service ──────────────────────────────────────────────────────
 const resourcesService = {
-  /**
-   * GET /resources/servers/summary/all
-   * Returns avg+peak for every server in one request.
-   */
   getAllServersSummary: async (startDate, endDate) => {
     const params = {};
     if (startDate) params.start_date = startDate;
@@ -56,11 +123,6 @@ const resourcesService = {
     const res = await api.get('/resources/servers/summary/all', { params });
     return Array.isArray(res.data) ? res.data : [];
   },
-
-  /**
-   * GET /resources/servers/{server_name}/metrics
-   * Returns time-series snapshots for one server (last N days).
-   */
   getServerTimeSeries: async (serverName, days = 7) => {
     const endDate   = new Date();
     const startDate = new Date();
@@ -74,89 +136,275 @@ const resourcesService = {
   },
 };
 
-// ─── Merge costs + real summaries into server list ─────────────────────────
-function buildServerList(costsData, summaries) {
-  const metricMap = {};
-  (summaries || []).forEach(s => {
-    metricMap[(s.server_name || '').trim().toLowerCase()] = s;
-  });
+// ─── Costs API ────────────────────────────────────────────────────────────
+const costsService = {
+  getAllCosts: async () => {
+    const res = await api.get('/costs', { params: { skip: 0, limit: 5000 } });
+    return Array.isArray(res.data) ? res.data : [];
+  },
+};
 
-  const costMap = {};
-  (costsData || []).forEach(c => {
-    if (!c.service_name || Number(c.amount || 0) <= 0) return;
-    const key = c.service_name.trim();
-    if (!costMap[key] || Number(c.amount) > Number(costMap[key].amount)) {
-      costMap[key] = c;
+// ─── OVHcloud service info API ────────────────────────────────────────────
+// Fetches creation/expiration dates from OVHcloud API via your backend proxy
+const ovhService = {
+  getServerInfo: async (serverName) => {
+    try {
+      // Tries /ovh/server/:name — your backend should proxy OVH GET /vps/{serviceName} or /dedicated/server/{serviceName}
+      const res = await api.get(`/ovh/server/${encodeURIComponent(serverName)}`);
+      return res.data || null;
+    } catch {
+      return null;
+    }
+  },
+  // Batch fetch for all servers (optional endpoint)
+  getAllServersInfo: async () => {
+    try {
+      const res = await api.get('/ovh/servers/info');
+      return Array.isArray(res.data) ? res.data : [];
+    } catch {
+      return [];
+    }
+  },
+};
+
+// ─── Build server list ────────────────────────────────────────────────────
+function buildServerList(summaries) {
+  return (summaries || [])
+    .filter(s => s.server_name)
+    .map(s => {
+      const avgCpu   = s.avg_cpu  ?? null;
+      const peakCpu  = s.peak_cpu ?? null;
+      const avgRam   = s.avg_ram  ?? 0;
+      const peakRam  = s.peak_ram ?? 0;
+      const avgDisk  = s.avg_disk ?? 0;
+      const peakDisk = s.peak_disk ?? 0;
+      const apiType = (s.server_type || '').toUpperCase();
+      const type = apiType === 'DEDICATED' ? 'Dedicated'
+                 : apiType === 'VPS'       ? 'VPS'
+                 : detectServerCategory(s.server_name);
+      return {
+        id:             `srv-${s.server_name.replace(/\s+/g, '-')}`,
+        name:           s.server_name,
+        type,
+        avgCpu, peakCpu, avgRam, peakRam, avgDisk, peakDisk,
+        records:        s.total_records ?? 0,
+        hasRealData:    (s.total_records ?? 0) > 0,
+        ramSource:      s.ram_source       || 'none',
+        diskSource:     s.disk_source      || 'none',
+        invoiceRamGb:   s.invoice_ram_gb   ?? null,
+        invoiceDiskGb:  s.invoice_disk_gb  ?? null,
+        cpuCores:       s.cpu_cores        ?? null,
+        cpuSource:      s.cpu_source       || 'none',
+        status:         calculateStatus(avgCpu, peakCpu),
+        // dates will be enriched later
+        creationDate:   null,
+        renewalDate:    null,
+        expirationDate: null,
+        firstInvoiceDate: null,
+        lastInvoiceDate:  null,
+      };
+    });
+}
+
+// ─── Build cost map: reference → monthly cost + dates ─────────────────────
+function buildCostMap(costs) {
+  const refMap = {};
+  const now = new Date();
+  const curMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+  costs.forEach(c => {
+    const ref = (c.reference || c.resource_id || c.external_id || '').replace(/\s+/g, '');
+    if (!ref) return;
+    const fk = fuzzyKey(ref);
+    if (!fk) return;
+    const amount = Number(c.amount || 0);
+    if (!refMap[fk]) refMap[fk] = {
+      total: 0, monthly: {}, displayRef: ref,
+      allDates: [],
+      creationDate: c.creation_date || null,
+      renewalDate:  c.renewal_date  || c.expiration_date || null,
+    };
+    refMap[fk].total += amount;
+
+    // Collect all invoice dates
+    if (c.cost_date) {
+      const d = new Date(c.cost_date);
+      if (!isNaN(d)) {
+        refMap[fk].allDates.push(d);
+        const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        refMap[fk].monthly[month] = (refMap[fk].monthly[month] || 0) + amount;
+      }
+    }
+
+    // Prefer explicit creation/renewal dates from cost record if available
+    if (!refMap[fk].creationDate && (c.creation_date || c.service_start_date)) {
+      refMap[fk].creationDate = c.creation_date || c.service_start_date;
+    }
+    if (!refMap[fk].renewalDate && (c.renewal_date || c.expiration_date || c.next_billing_date)) {
+      refMap[fk].renewalDate = c.renewal_date || c.expiration_date || c.next_billing_date;
     }
   });
 
-  const allNames = new Set([
-    ...Object.keys(costMap),
-    ...(summaries || []).map(s => (s.server_name || '').trim()),
-  ]);
+  const result = {};
+  for (const [fk, data] of Object.entries(refMap)) {
+    const months = Object.entries(data.monthly).sort(([a], [b]) => b.localeCompare(a));
+    const latestMonthCost = months.length > 0 ? months[0][1] : data.total;
+    const latestMonth     = months.length > 0 ? months[0][0] : null;
 
-  const servers = [];
-  allNames.forEach(name => {
-    if (!name) return;
-    const cost   = costMap[name];
-    const metric = metricMap[name.toLowerCase()];
+    // Derive first/last invoice date from collected dates
+    const sortedDates = data.allDates.sort((a, b) => a - b);
+    const firstInvoice = sortedDates.length > 0 ? sortedDates[0]  : null;
+    const lastInvoice  = sortedDates.length > 0 ? sortedDates[sortedDates.length - 1] : null;
 
-    const avgCpu   = metric?.avg_cpu   ?? 0;
-    const peakCpu  = metric?.peak_cpu  ?? 0;
-    const avgRam   = metric?.avg_ram   ?? 0;
-    const peakRam  = metric?.peak_ram  ?? 0;
-    const avgDisk  = metric?.avg_disk  ?? 0;
-    const peakDisk = metric?.peak_disk ?? 0;
-
-    servers.push({
-      id:           cost?.id || `srv-${name.replace(/\s+/g, '-')}`,
-      name,
-      type:         detectServerCategory(name),
-      monthlyCost:  Number(cost?.amount || 0),
-      reference:    cost?.reference || cost?.resource_id || cost?.external_id || '—',
-      specs:        cost?.specs || '—',
-      avgCpu, peakCpu, avgRam, peakRam, avgDisk, peakDisk,
-      records:      metric?.total_records ?? 0,
-      hasRealData:  !!metric && (metric.total_records ?? 0) > 0,
-      status:       calculateStatus(avgCpu, peakCpu),
-    });
-  });
-
-  return servers;
+    result[fk] = {
+      monthlyAmount:    latestMonthCost,
+      totalAmount:      data.total,
+      latestMonth,
+      displayRef:       data.displayRef,
+      creationDate:     data.creationDate,
+      renewalDate:      data.renewalDate,
+      firstInvoiceDate: firstInvoice,
+      lastInvoiceDate:  lastInvoice,
+    };
+  }
+  return result;
 }
 
+// ─── Attach costs + dates to servers ──────────────────────────────────────
+function enrichServersWithCosts(servers, costMap) {
+  return servers.map(srv => {
+    const fk = fuzzyKey(srv.name);
+    const costData = costMap[fk] || null;
+    return {
+      ...srv,
+      monthlyCost:      costData?.monthlyAmount    ?? null,
+      totalCost:        costData?.totalAmount      ?? null,
+      costMonth:        costData?.latestMonth      ?? null,
+      creationDate:     costData?.creationDate     ?? null,
+      renewalDate:      costData?.renewalDate      ?? null,
+      firstInvoiceDate: costData?.firstInvoiceDate ?? null,
+      lastInvoiceDate:  costData?.lastInvoiceDate  ?? null,
+    };
+  });
+}
+
+// ─── Attach OVH info (creation/expiration) to servers ─────────────────────
+function enrichServersWithOvhInfo(servers, ovhInfoList) {
+  if (!ovhInfoList || ovhInfoList.length === 0) return servers;
+  const ovhMap = {};
+  ovhInfoList.forEach(info => {
+    const key = fuzzyKey(info.serviceName || info.name || '');
+    if (key) ovhMap[key] = info;
+  });
+
+  return servers.map(srv => {
+    const key = fuzzyKey(srv.name);
+    const ovh = ovhMap[key] || null;
+    if (!ovh) return srv;
+
+    // OVH API fields: creation → 'creationDate', expiration → 'expiration' or 'renewalDate'
+    return {
+      ...srv,
+      creationDate:   srv.creationDate   || ovh.creationDate   || ovh.creation_date   || null,
+      renewalDate:    srv.renewalDate    || ovh.expiration      || ovh.renewalDate     || ovh.renewal_date     || null,
+      expirationDate: ovh.expiration     || ovh.expirationDate  || null,
+      ovhState:       ovh.state          || null,
+      ovhOffer:       ovh.offer          || ovh.currentRange    || null,
+    };
+  });
+}
+
+// ─── Generate summary stats ────────────────────────────────────────────────
 function generateSummary(servers) {
   const real = servers.filter(s => s.hasRealData);
+  const withRam  = servers.filter(s => s.avgRam  > 0);
+  const withDisk = servers.filter(s => s.avgDisk > 0);
+  const withCost = servers.filter(s => s.monthlyCost !== null);
   return {
     total:         servers.length,
     optimized:     servers.filter(s => s.status === 'optimized').length,
     underutilized: servers.filter(s => s.status === 'underutilized').length,
     critical:      servers.filter(s => s.status === 'critical').length,
-    avgCpu:   real.length > 0 ? real.reduce((s, x) => s + x.avgCpu,  0) / real.length : 0,
-    avgRam:   real.length > 0 ? real.reduce((s, x) => s + x.avgRam,  0) / real.length : 0,
-    avgDisk:  real.length > 0 ? real.reduce((s, x) => s + x.avgDisk, 0) / real.length : 0,
-    totalCost: servers.reduce((s, x) => s + x.monthlyCost, 0),
+    avgCpu:  (() => { const c = real.filter(x => x.avgCpu !== null); return c.length > 0 ? c.reduce((s,x) => s + x.avgCpu, 0) / c.length : null; })(),
+    avgRam:  withRam.length  > 0 ? withRam.reduce((s,x)  => s + x.avgRam,  0) / withRam.length  : 0,
+    avgDisk: withDisk.length > 0 ? withDisk.reduce((s,x) => s + x.avgDisk, 0) / withDisk.length : 0,
+    totalMonthlyCost: withCost.reduce((s, x) => s + (x.monthlyCost || 0), 0),
+    serversWithCost:  withCost.length,
   };
 }
 
+// ─── Formatters ────────────────────────────────────────────────────────────
+const fmtEuro = v => Number(v || 0).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtDate = d => {
+  if (!d) return '—';
+  const date = d instanceof Date ? d : new Date(d);
+  if (isNaN(date)) return '—';
+  return date.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+const fmtDateShort = d => {
+  if (!d) return '—';
+  const date = d instanceof Date ? d : new Date(d);
+  if (isNaN(date)) return '—';
+  return date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+};
+const daysUntil = d => {
+  if (!d) return null;
+  const date = d instanceof Date ? d : new Date(d);
+  if (isNaN(date)) return null;
+  return Math.ceil((date - new Date()) / (1000 * 60 * 60 * 24));
+};
+
+// ─── Design tokens ─────────────────────────────────────────────────────────
+const T = {
+  green:    '#0E7A50',
+  greenBg:  '#ECFDF5',
+  blue:     '#1D4ED8',
+  blueBg:   '#EFF6FF',
+  purple:   '#7C3AED',
+  purpleBg: '#F5F3FF',
+  amber:    '#B45309',
+  amberBg:  '#FFFBEB',
+  red:      '#DC2626',
+  redBg:    '#FEF2F2',
+  slate:    '#0F172A',
+  muted:    '#64748B',
+  border:   '#E2E8F0',
+  bg:       '#F8FAFC',
+};
+
 // ─── SummaryCard ───────────────────────────────────────────────────────────
-function SummaryCard({ label, value, sub, color, bg, icon: Icon, trend }) {
+function SummaryCard({ label, value, sub, accentColor, bgColor, icon: Icon, trend, badge }) {
   return (
-    <div
-      style={{ flex: '1 1 160px', background: bg, border: `1px solid ${color}33`, borderRadius: 16, padding: '20px 22px', display: 'flex', alignItems: 'flex-start', gap: 14, boxShadow: `0 2px 8px ${color}10`, transition: 'transform .15s, box-shadow .15s' }}
-      onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 8px 24px ${color}25`; }}
-      onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)';    e.currentTarget.style.boxShadow = `0 2px 8px ${color}10`; }}
+    <div style={{
+      flex: '1 1 180px',
+      background: 'white',
+      border: `1px solid ${T.border}`,
+      borderRadius: 16,
+      padding: '20px 22px',
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 14,
+      boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
+      position: 'relative',
+      overflow: 'hidden',
+      transition: 'transform .15s, box-shadow .15s',
+    }}
+      onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 8px 24px rgba(0,0,0,0.10)`; }}
+      onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 1px 4px rgba(0,0,0,0.06)'; }}
     >
-      <div style={{ width: 44, height: 44, borderRadius: 12, background: color, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: `0 4px 12px ${color}55` }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: accentColor, borderRadius: '16px 16px 0 0' }} />
+      <div style={{ position: 'absolute', right: -20, bottom: -20, width: 90, height: 90, borderRadius: '50%', background: bgColor, opacity: 0.8 }} />
+      <div style={{ width: 44, height: 44, borderRadius: 12, background: accentColor, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: `0 4px 12px ${accentColor}55`, position: 'relative' }}>
         <Icon size={20} color="white" />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <p style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 4 }}>{label}</p>
-        <p style={{ fontSize: 24, fontWeight: 900, color: '#0f172a', lineHeight: 1, letterSpacing: '-0.5px', marginBottom: 4 }}>{value}</p>
-        {sub && <p style={{ fontSize: 11, color: '#64748b' }}>{sub}</p>}
+      <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
+        <p style={{ fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 4 }}>{label}</p>
+        <p style={{ fontSize: 26, fontWeight: 900, color: T.slate, lineHeight: 1, letterSpacing: '-0.5px', marginBottom: 4 }}>{value}</p>
+        {sub && <p style={{ fontSize: 11, color: T.muted }}>{sub}</p>}
+        {badge && <span style={{ display: 'inline-block', marginTop: 6, padding: '2px 8px', borderRadius: 99, background: bgColor, color: accentColor, fontSize: 10, fontWeight: 700, border: `1px solid ${accentColor}33` }}>{badge}</span>}
         {trend !== undefined && (
-          <p style={{ fontSize: 11, color: trend > 0 ? '#dc2626' : '#16a34a', fontWeight: 600, marginTop: 4 }}>
-            {trend > 0 ? '↑' : '↓'} {Math.abs(trend).toFixed(1)}%
+          <p style={{ fontSize: 11, color: trend > 0 ? T.red : T.green, fontWeight: 700, marginTop: 4, display: 'flex', alignItems: 'center', gap: 3 }}>
+            {trend > 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />} {Math.abs(trend).toFixed(1)}%
           </p>
         )}
       </div>
@@ -165,197 +413,351 @@ function SummaryCard({ label, value, sub, color, bg, icon: Icon, trend }) {
 }
 
 // ─── CpuBar ────────────────────────────────────────────────────────────────
-function CpuBar({ value, peak }) {
-  const color = value < 10 ? '#f59e0b' : value > 85 ? '#dc2626' : '#16a34a';
+function CpuBar({ value, peak, cpuCores, cpuSource }) {
+  if (value === null || value === undefined) {
+    if (cpuCores && cpuSource === 'hw_specs') {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, background: T.blueBg, color: T.blue, border: `1px solid #93c5fd` }}>
+            🖥️ {cpuCores}c
+          </span>
+          <span style={{ fontSize: 10, color: '#94a3b8' }}>cores (hw-spec)</span>
+        </div>
+      );
+    }
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, background: '#f1f5f9', color: '#94a3b8', border: '1px dashed #cbd5e1' }}>
+        N/A
+      </span>
+    );
+  }
+  const color = value < 10 ? '#f59e0b' : value > 85 ? T.red : '#16a34a';
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 120 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 110 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-        <span style={{ fontWeight: 700, color }}>{value.toFixed(1)}%</span>
-        <span style={{ color: '#94a3b8', fontSize: 11 }}>peak {peak.toFixed(1)}%</span>
+        <span style={{ fontWeight: 800, color }}>{value.toFixed(1)}%</span>
+        <span style={{ color: '#94a3b8', fontSize: 11 }}>pk {peak !== null ? peak.toFixed(1) + '%' : 'N/A'}</span>
       </div>
-      <div style={{ height: 6, borderRadius: 99, background: '#f1f5f9', overflow: 'hidden' }}>
+      <div style={{ height: 5, borderRadius: 99, background: '#f1f5f9', overflow: 'hidden' }}>
         <div style={{ height: '100%', borderRadius: 99, width: `${Math.min(value, 100)}%`, background: color, transition: 'width 0.6s ease' }} />
       </div>
     </div>
   );
 }
 
-// ─── NoDataBadge ───────────────────────────────────────────────────────────
-function NoDataBadge() {
+// ─── CostCell ────────────────────────────────────────────────────────────
+function CostCell({ monthlyCost, status }) {
+  if (monthlyCost === null || monthlyCost === undefined) {
+    return <span style={{ fontSize: 11, color: '#cbd5e1', fontStyle: 'italic' }}>—</span>;
+  }
+  const isWasteful = status === 'underutilized';
+  const isCritical = status === 'critical';
+  const textColor = isCritical ? T.red : isWasteful ? T.amber : T.green;
+  const bgColor   = isCritical ? T.redBg : isWasteful ? T.amberBg : T.greenBg;
+  const borderColor = isCritical ? '#fca5a5' : isWasteful ? '#fcd34d' : '#6ee7b7';
   return (
-    <span
-      title="Aucune donnée dans la base. Vérifiez l'ingestion OVH."
-      style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: '#f1f5f9', color: '#94a3b8', border: '1px dashed #cbd5e1' }}
-    >
-      Pas de données
-    </span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, fontSize: 13, fontWeight: 800, color: textColor, background: bgColor, border: `1px solid ${borderColor}`, whiteSpace: 'nowrap' }}>
+        {fmtEuro(monthlyCost)} €
+      </span>
+      {isWasteful && <span style={{ fontSize: 10, color: T.amber, fontWeight: 600, paddingLeft: 2 }}>⚠ coût gaspillé</span>}
+    </div>
   );
 }
 
-// ─── ServerTable ───────────────────────────────────────────────────────────
-function ServerTable({ servers = [], loading, onServerSelect }) {
-  const [sortKey, setSortKey] = useState('monthlyCost');
-  const [sortDir, setSortDir] = useState('desc');
+// ─── NoDataBadge ──────────────────────────────────────────────────────────
+function NoDataBadge() {
+  return <span style={{ fontSize: 11, color: '#94a3b8', background: '#f8fafc', padding: '2px 8px', borderRadius: 6, border: '1px dashed #e2e8f0' }}>—</span>;
+}
+
+// ─── DateCell — shows creation + renewal dates ─────────────────────────────
+function DateCell({ server }) {
+  const { creationDate, renewalDate, expirationDate, firstInvoiceDate, lastInvoiceDate } = server;
+
+  // Effective dates: prefer OVH API data, fallback to cost invoice dates
+  const effectiveCreation = creationDate || firstInvoiceDate;
+  const effectiveRenewal  = renewalDate  || expirationDate;
+
+  const daysLeft = daysUntil(effectiveRenewal);
+  const renewalColor = daysLeft !== null
+    ? daysLeft < 7  ? T.red
+    : daysLeft < 30 ? T.amber
+    : T.green
+    : T.muted;
+
+  if (!effectiveCreation && !effectiveRenewal) {
+    return <span style={{ fontSize: 11, color: '#cbd5e1', fontStyle: 'italic' }}>—</span>;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      {effectiveCreation && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <Calendar size={10} color="#94a3b8" />
+          <span style={{ fontSize: 10, color: '#94a3b8' }}>Créé</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.slate }}>{fmtDateShort(effectiveCreation)}</span>
+          {firstInvoiceDate && !creationDate && (
+            <span style={{ fontSize: 9, color: '#cbd5e1' }} title="Date déduite de la première facture">≈</span>
+          )}
+        </div>
+      )}
+      {effectiveRenewal && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <Repeat size={10} color={renewalColor} />
+          <span style={{ fontSize: 10, color: '#94a3b8' }}>Renouv.</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: renewalColor }}>{fmtDateShort(effectiveRenewal)}</span>
+          {daysLeft !== null && (
+            <span style={{ fontSize: 9, fontWeight: 700, color: renewalColor, background: renewalColor + '15', padding: '1px 5px', borderRadius: 4 }}>
+              {daysLeft > 0 ? `J-${daysLeft}` : `Expiré`}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── RightsizingCell — concrete recommendation ─────────────────────────────
+function RightsizingCell({ server }) {
+  const rs = computeRightsizing(server);
+
+  if (!rs.recommendation) {
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 99, fontSize: 12, fontWeight: 700, background: T.greenBg, color: T.green, border: '1px solid #6ee7b7' }}>
+        ✓ Optimal
+      </span>
+    );
+  }
+
+  if (rs.recommendation === 'downsize') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 99, fontSize: 12, fontWeight: 700, background: T.amberBg, color: T.amber, border: '1px solid #fcd34d', whiteSpace: 'nowrap' }}>
+          <ArrowDownCircle size={13} /> Downsize
+        </span>
+        {rs.targetLabel && (
+          <span style={{ fontSize: 10, color: T.amber, fontWeight: 600, paddingLeft: 2 }}>→ {rs.targetLabel}</span>
+        )}
+        {rs.savingsEst > 0 && (
+          <span style={{ fontSize: 10, fontWeight: 700, color: T.green, background: T.greenBg, border: '1px solid #6ee7b7', borderRadius: 6, padding: '1px 6px', display: 'inline-block' }}>
+            💰 Éco. ~{fmtEuro(rs.savingsEst)} €/mois
+          </span>
+        )}
+        {rs.reason && (
+          <span style={{ fontSize: 9, color: '#94a3b8', maxWidth: 180, lineHeight: 1.3, display: 'block' }}>{rs.reason}</span>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 99, fontSize: 12, fontWeight: 700, background: T.redBg, color: T.red, border: '1px solid #fca5a5', whiteSpace: 'nowrap' }}>
+        <ArrowUpCircle size={13} /> Upsize requis
+      </span>
+      {rs.targetLabel && (
+        <span style={{ fontSize: 10, color: T.red, fontWeight: 600, paddingLeft: 2 }}>→ {rs.targetLabel}</span>
+      )}
+      {rs.reason && (
+        <span style={{ fontSize: 9, color: '#94a3b8', maxWidth: 180, lineHeight: 1.3, display: 'block' }}>{rs.reason}</span>
+      )}
+    </div>
+  );
+}
+
+// ─── ServerTable ──────────────────────────────────────────────────────────
+function ServerTable({ servers, loading, onServerSelect }) {
+  const [sortKey, setSortKey] = useState('name');
+  const [sortDir, setSortDir] = useState('asc');
 
   const handleSort = key => {
-    if (sortKey === key) setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
-    else { setSortKey(key); setSortDir('desc'); }
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('asc'); }
   };
 
-  const sorted = [...servers].sort((a, b) => {
-    const v = sortDir === 'asc' ? 1 : -1;
-    return (a[sortKey] > b[sortKey] ? 1 : -1) * v;
-  });
+  const sorted = useMemo(() => {
+    return [...servers].sort((a, b) => {
+      let va = a[sortKey] ?? '';
+      let vb = b[sortKey] ?? '';
+      if (sortKey === 'monthlyCost') { va = va ?? -1; vb = vb ?? -1; }
+      if (typeof va === 'string') va = va.toLowerCase();
+      if (typeof vb === 'string') vb = vb.toLowerCase();
+      if (va < vb) return sortDir === 'asc' ? -1 : 1;
+      if (va > vb) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [servers, sortKey, sortDir]);
 
   const SortIcon = ({ col }) => {
-    if (sortKey !== col) return <ChevronUp size={12} style={{ opacity: 0.3 }} />;
-    return sortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />;
-  };
-
-  const STATUS_MAP = {
-    optimized:     { label: 'Optimisé',     color: '#16a34a', bg: '#dcfce7', border: '#86efac' },
-    underutilized: { label: 'Sous-utilisé', color: '#d97706', bg: '#fef3c7', border: '#fcd34d' },
-    critical:      { label: 'Critique',     color: '#dc2626', bg: '#fee2e2', border: '#fca5a5' },
-  };
-
-  const RECOMMENDATION_MAP = {
-    optimized:     { icon: '✅', text: 'Usage équilibré' },
-    underutilized: { icon: '💡', text: 'Envisager un downsize' },
-    critical:      { icon: '⚠️', text: 'Envisager un upsize' },
+    if (sortKey !== col) return <ChevronUp size={11} style={{ opacity: 0.3 }} />;
+    return sortDir === 'asc' ? <ChevronUp size={11} /> : <ChevronDown size={11} />;
   };
 
   const thStyle = col => ({
-    padding: '14px 20px', textAlign: 'left', fontSize: 11, fontWeight: 800,
-    color: sortKey === col ? '#1B5E46' : '#94a3b8',
+    padding: '13px 12px', textAlign: 'left', fontSize: 10, fontWeight: 800,
+    color: sortKey === col ? T.green : '#94a3b8',
     textTransform: 'uppercase', letterSpacing: '.08em',
     cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
+    background: '#F8FAFC',
   });
 
   return (
     <div style={{ overflowX: 'auto', background: 'white' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1100 }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1560 }}>
         <thead>
-          <tr style={{ background: '#f8fafc', borderBottom: '2px solid #f1f5f9' }}>
-            <th style={thStyle('name')}      onClick={() => handleSort('name')}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Server size={13} /> Serveur <SortIcon col="name" /></div>
+          <tr style={{ borderBottom: '2px solid #F1F5F9' }}>
+            <th style={thStyle('name')} onClick={() => handleSort('name')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Server size={12} /> Serveur <SortIcon col="name" /></div>
             </th>
-            <th style={{ ...thStyle('type'),      cursor: 'default' }}>Type</th>
-            <th style={{ ...thStyle('reference'), cursor: 'default' }}>Référence</th>
-            <th style={thStyle('avgCpu')}    onClick={() => handleSort('avgCpu')}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Cpu size={13} /> CPU moy. <SortIcon col="avgCpu" /></div>
+            <th style={{ ...thStyle('type'), cursor: 'default' }}>Type</th>
+            <th style={thStyle('avgCpu')} onClick={() => handleSort('avgCpu')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Cpu size={12} /> CPU moy. <SortIcon col="avgCpu" /></div>
             </th>
-            <th style={thStyle('avgRam')}    onClick={() => handleSort('avgRam')}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><MemoryStick size={13} /> RAM moy. <SortIcon col="avgRam" /></div>
+            <th style={thStyle('avgRam')} onClick={() => handleSort('avgRam')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><MemoryStick size={12} /> RAM moy. <SortIcon col="avgRam" /></div>
             </th>
-            <th style={thStyle('avgDisk')}   onClick={() => handleSort('avgDisk')}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><HardDrive size={13} /> Disque moy. <SortIcon col="avgDisk" /></div>
+            <th style={thStyle('avgDisk')} onClick={() => handleSort('avgDisk')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><HardDrive size={12} /> Disque moy. <SortIcon col="avgDisk" /></div>
             </th>
             <th style={thStyle('monthlyCost')} onClick={() => handleSort('monthlyCost')}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>💰 Coût/mois <SortIcon col="monthlyCost" /></div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><DollarSign size={12} /> Coût / mois <SortIcon col="monthlyCost" /></div>
             </th>
-            <th style={{ ...thStyle('status'), cursor: 'default' }}>Statut</th>
-            <th style={{ ...thStyle('status'), cursor: 'default', minWidth: 220 }}>Recommandation</th>
+            {/* NEW: Dates column */}
+            <th style={{ ...thStyle('creationDate'), cursor: 'default', minWidth: 150 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Calendar size={12} /> Dates</div>
+            </th>
+            <th style={{ ...thStyle('ramSource'), cursor: 'default', minWidth: 120 }}>Source</th>
           </tr>
         </thead>
         <tbody>
           {loading && (
             <tr>
-              <td colSpan={9} style={{ padding: 60, textAlign: 'center', color: '#94a3b8', fontSize: 14 }}>
-                <div style={{ display: 'inline-block', width: 24, height: 24, border: '3px solid #e2e8f0', borderTopColor: '#1B5E46', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+              <td colSpan={8} style={{ padding: 60, textAlign: 'center', color: '#94a3b8', fontSize: 14 }}>
+                <div style={{ display: 'inline-block', width: 24, height: 24, border: '3px solid #e2e8f0', borderTopColor: T.green, borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
                 <p style={{ marginTop: 12 }}>Chargement des serveurs...</p>
               </td>
             </tr>
           )}
           {!loading && sorted.length === 0 && (
             <tr>
-              <td colSpan={9} style={{ padding: 60, textAlign: 'center', color: '#94a3b8', fontSize: 14 }}>
-                <Server size={48} style={{ opacity: 0.2, margin: '0 auto 16px', display: 'block' }} />
+              <td colSpan={8} style={{ padding: 60, textAlign: 'center', color: '#94a3b8', fontSize: 14 }}>
+                <Server size={48} style={{ opacity: 0.15, margin: '0 auto 16px', display: 'block' }} />
                 Aucun serveur trouvé
               </td>
             </tr>
           )}
           {!loading && sorted.map((s, i) => {
-            const statusCfg = STATUS_MAP[s.status] || STATUS_MAP.optimized;
-            const rec       = RECOMMENDATION_MAP[s.status] || RECOMMENDATION_MAP.optimized;
+            const isOdd = i % 2 === 0;
+            const rs = computeRightsizing(s);
             return (
               <tr
                 key={s.id}
-                onClick={() => onServerSelect?.(s)}
-                style={{ borderTop: '1px solid #f8fafc', background: i % 2 === 0 ? '#fff' : '#fafafa', transition: 'background .1s', cursor: onServerSelect ? 'pointer' : 'default' }}
-                onMouseEnter={e => onServerSelect && (e.currentTarget.style.background = '#eff6ff')}
-                onMouseLeave={e => (e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa')}
+                style={{ borderBottom: '1px solid #F8FAFC', background: isOdd ? 'white' : '#FAFBFC', cursor: 'pointer', transition: 'background .1s' }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#F0FDF8'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = isOdd ? 'white' : '#FAFBFC'; }}
+                onClick={() => onServerSelect(s)}
               >
                 {/* SERVER NAME */}
-                <td style={{ padding: '18px 20px' }}>
-                  <div style={{ fontWeight: 700, color: '#0f172a', fontSize: 14, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.name}>{s.name}</div>
-                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
-                    {s.records > 0 ? `${s.records} enregistrement${s.records !== 1 ? 's' : ''}` : 'Aucune donnée'}
+                <td style={{ padding: '14px 12px' }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: T.slate, marginBottom: 2 }}>
+                    {s.name.replace(/\.ovh\.net|\.vps\.ovh\.net/gi, '')}
+                    <span style={{ fontSize: 10, color: '#94a3b8', fontWeight: 400 }}>.ovh.net</span>
                   </div>
-                </td>
-
-                {/* TYPE */}
-                <td style={{ padding: '18px 20px' }}>
-                  <span style={{ padding: '4px 12px', borderRadius: 9999, fontSize: 11, fontWeight: 700, background: s.type === 'VPS' ? '#F3E8FF' : '#EFF6FF', color: s.type === 'VPS' ? '#7C3AED' : '#2563EB' }}>
-                    {s.type === 'VPS' ? '🖥️ VPS' : '🗄️ Dédié'}
+                  <span style={{ fontSize: 10, color: '#94a3b8' }}>
+                    {s.records > 0 ? `${s.records} enregistrements` : '0 enregistrements'}
                   </span>
-                </td>
-
-                {/* REFERENCE */}
-                <td style={{ padding: '18px 20px' }}>
-                  {s.reference && s.reference !== '—' ? (
-                    <span style={{ display: 'inline-block', padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, fontFamily: 'monospace', background: '#f1f5f9', color: '#334155', border: '1px solid #e2e8f0', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.reference}>
-                      {s.reference}
-                    </span>
-                  ) : <span style={{ fontSize: 12, color: '#cbd5e1' }}>—</span>}
-                </td>
-
-                {/* CPU */}
-                <td style={{ padding: '18px 20px' }}>
-                  {s.hasRealData ? <CpuBar value={s.avgCpu} peak={s.peakCpu} /> : <NoDataBadge />}
-                </td>
-
-                {/* RAM */}
-                <td style={{ padding: '18px 20px', fontWeight: 700, color: '#0f172a' }}>
-                  {s.hasRealData ? (
-                    <>
-                      {s.avgRam.toFixed(1)} <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 400 }}>GB</span>
-                      <div style={{ fontSize: 11, color: '#94a3b8' }}>peak {s.peakRam.toFixed(1)} GB</div>
-                    </>
-                  ) : <NoDataBadge />}
-                </td>
-
-                {/* DISK */}
-                <td style={{ padding: '18px 20px', fontWeight: 700, color: '#0f172a' }}>
-                  {s.hasRealData ? (
-                    <>
-                      {s.avgDisk.toFixed(1)} <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 400 }}>GB</span>
-                      <div style={{ fontSize: 11, color: '#94a3b8' }}>peak {s.peakDisk.toFixed(1)} GB</div>
-                    </>
-                  ) : <NoDataBadge />}
-                </td>
-
-                {/* COST */}
-                <td style={{ padding: '18px 20px' }}>
-                  <span style={{ fontSize: 14, fontWeight: 800, color: '#1B5E46' }}>{fmt2(s.monthlyCost)} €</span>
-                </td>
-
-                {/* STATUS */}
-                <td style={{ padding: '18px 20px' }}>
-                  {s.hasRealData ? (
-                    <span style={{ display: 'inline-block', padding: '5px 14px', borderRadius: 9999, fontSize: 11, fontWeight: 700, color: statusCfg.color, background: statusCfg.bg, border: `1px solid ${statusCfg.border}` }}>
-                      {statusCfg.label}
-                    </span>
-                  ) : (
-                    <span style={{ display: 'inline-block', padding: '5px 14px', borderRadius: 9999, fontSize: 11, fontWeight: 700, color: '#94a3b8', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
-                      Inconnu
-                    </span>
+                  {s.ovhOffer && (
+                    <div style={{ marginTop: 2 }}>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: T.blue, background: T.blueBg, padding: '1px 6px', borderRadius: 4, border: `1px solid #bfdbfe` }}>
+                        {s.ovhOffer}
+                      </span>
+                    </div>
                   )}
                 </td>
 
-                {/* RECOMMENDATION */}
-                <td style={{ padding: '18px 20px', fontSize: 13, color: '#374151' }}>
-                  {s.hasRealData ? `${rec.icon} ${rec.text}` : '—'}
+                {/* TYPE */}
+                <td style={{ padding: '14px 12px' }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700, background: s.type === 'VPS' ? T.purpleBg : T.blueBg, color: s.type === 'VPS' ? T.purple : T.blue, border: `1px solid ${s.type === 'VPS' ? '#c4b5fd' : '#93c5fd'}` }}>
+                    {s.type === 'VPS' ? '🖥️' : '🗄️'} {s.type}
+                  </span>
                 </td>
+
+                {/* CPU */}
+                <td style={{ padding: '14px 12px', minWidth: 130 }}>
+                  <CpuBar value={s.avgCpu} peak={s.peakCpu} cpuCores={s.cpuCores} cpuSource={s.cpuSource} />
+                </td>
+
+                {/* RAM */}
+                <td style={{ padding: '14px 12px' }}>
+                  <div style={{ fontWeight: 800, fontSize: 13, color: T.slate }}>
+                    {s.avgRam > 0 ? (
+                      <>{s.avgRam.toFixed(1)} <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 400 }}>GB</span></>
+                    ) : <NoDataBadge />}
+                  </div>
+                  {s.avgRam > 0 && (
+                    <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 2 }}>
+                      {s.ramSource === 'invoice'
+                        ? <span style={{ color: T.amber, fontWeight: 600 }}>📄 capacité facture</span>
+                        : s.invoiceRamGb
+                          ? <>cap <strong style={{ color: T.green }}>{s.invoiceRamGb.toFixed(0)} GB</strong></>
+                          : <>cap <strong style={{ color: '#64748b' }}>{s.peakRam.toFixed(0)} GB</strong></>}
+                    </div>
+                  )}
+                </td>
+
+                {/* DISK */}
+                <td style={{ padding: '14px 12px' }}>
+                  <div style={{ fontWeight: 800, fontSize: 13, color: T.slate }}>
+                    {s.avgDisk > 0 ? (
+                      <>{s.avgDisk.toFixed(1)} <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 400 }}>GB</span></>
+                    ) : <NoDataBadge />}
+                  </div>
+                  {s.avgDisk > 0 && (
+                    <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 2 }}>
+                      {s.diskSource === 'invoice'
+                        ? <span style={{ color: T.amber, fontWeight: 600 }}>📄 capacité facture</span>
+                        : s.invoiceDiskGb
+                          ? <>cap <strong style={{ color: T.green }}>{s.invoiceDiskGb.toFixed(0)} GB</strong></>
+                          : <>cap <strong style={{ color: '#64748b' }}>{s.peakDisk.toFixed(0)} GB</strong></>}
+                    </div>
+                  )}
+                </td>
+
+                {/* COST */}
+                <td style={{ padding: '14px 12px', minWidth: 140 }}>
+                  <CostCell monthlyCost={s.monthlyCost} status={s.status} />
+                </td>
+
+                {/* DATES — NEW */}
+                <td style={{ padding: '14px 12px', minWidth: 150 }}>
+                  <DateCell server={s} />
+                </td>
+
+                {/* SOURCE */}
+                <td style={{ padding: '14px 12px' }}>
+                  {(() => {
+                    const isOvh      = s.hasRealData;
+                    const hasInvoice = s.invoiceRamGb !== null || s.invoiceDiskGb !== null;
+                    const invoiceOnly= !isOvh && (s.ramSource === 'invoice' || s.diskSource === 'invoice');
+                    const isMixed    = isOvh && hasInvoice;
+                    const badge = (txt, color, bg, border) => (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 9px', borderRadius: 99, fontSize: 10, fontWeight: 700, background: bg, color, border: `1px solid ${border}`, whiteSpace: 'nowrap' }}>
+                        {txt}
+                      </span>
+                    );
+                    if (isMixed) return (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                        {badge('🔷 OVHcloud', '#0073d1', '#e0f2fe', '#7dd3fc')}
+                        {badge('📄 Facture', T.amber, T.amberBg, '#fcd34d')}
+                      </div>
+                    );
+                    if (invoiceOnly) return badge('📄 Facture', T.amber, T.amberBg, '#fcd34d');
+                    if (isOvh)       return badge('🔷 OVHcloud', '#0073d1', '#e0f2fe', '#7dd3fc');
+                    return <span style={{ fontSize: 11, color: '#cbd5e1' }}>—</span>;
+                  })()}
+                </td>
+
+                {/* RIGHTSIZING — removed */}
               </tr>
             );
           })}
@@ -365,189 +767,453 @@ function ServerTable({ servers = [], loading, onServerSelect }) {
   );
 }
 
-// ─── ResourceChart ─────────────────────────────────────────────────────────
-function ResourceChart({ data = [], metricKey, label, unit, color }) {
-  if (!data || data.length === 0) {
-    return (
-      <div style={{ background: '#fff', borderRadius: 20, border: '1px solid #e2e8f0', padding: '24px 28px', height: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', flexDirection: 'column', gap: 8 }}>
-        <span style={{ fontSize: 32 }}>📉</span>
-        <span>Aucune donnée disponible</span>
-        <span style={{ fontSize: 11 }}>Vérifiez l'ingestion OVH dans votre backend</span>
-      </div>
-    );
-  }
-
-  const maxValue = Math.max(...data.map(d => d[metricKey] || 0));
-  const avgValue = data.reduce((s, d) => s + (d[metricKey] || 0), 0) / data.length;
-
-  const CustomTooltip = ({ active, payload, label: lbl }) => {
-    if (!active || !payload?.length) return null;
-    return (
-      <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 12, padding: '10px 16px', fontSize: 12, color: '#f8fafc' }}>
-        <p style={{ color: '#94a3b8', marginBottom: 6, fontSize: 11 }}>{new Date(lbl).toLocaleString('fr-FR')}</p>
-        {payload.map((p, idx) => <p key={idx} style={{ color: p.color, fontWeight: 700 }}>{p.name}: {p.value.toFixed(1)}{unit}</p>)}
-      </div>
-    );
-  };
-
+// ─── ResourceChart ────────────────────────────────────────────────────────
+function ResourceChart({ data, metricKey, label, unit, color }) {
+  const chartData = data.map(d => ({
+    time: new Date(d.recorded_at).toLocaleDateString('fr-FR', { month: 'short', day: 'numeric' }),
+    value: d[metricKey] ?? 0,
+  }));
   return (
-    <div style={{ background: '#fff', borderRadius: 20, border: '1px solid #e2e8f0', padding: '24px 28px', boxShadow: '0 4px 20px rgba(0,0,0,.05)' }}>
-      <div style={{ marginBottom: 20 }}>
-        <h3 style={{ fontSize: 15, fontWeight: 800, color: '#0f172a', marginBottom: 2 }}>{label}</h3>
-        <p style={{ fontSize: 12, color: '#94a3b8' }}>
-          Max: <span style={{ fontWeight: 700, color }}>{maxValue.toFixed(1)}{unit}</span>
-          {' • '}
-          Avg: <span style={{ fontWeight: 700, color }}>{avgValue.toFixed(1)}{unit}</span>
-        </p>
-      </div>
-      <ResponsiveContainer width="100%" height={240}>
-        <LineChart data={data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-          <XAxis dataKey="timestamp" tickFormatter={v => new Date(v).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
-          <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={v => `${v}${unit}`} />
-          <Tooltip content={<CustomTooltip />} />
-          <Line type="monotone" dataKey={metricKey} stroke={color} strokeWidth={2.5} dot={false} activeDot={{ r: 5, strokeWidth: 0, fill: color }} name={label} />
+    <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, padding: '20px 24px', boxShadow: '0 2px 12px rgba(0,0,0,0.05)' }}>
+      <h3 style={{ fontSize: 13, fontWeight: 800, color: T.slate, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ width: 10, height: 10, borderRadius: '50%', background: color, display: 'inline-block' }} />
+        {label} <span style={{ color: T.muted, fontWeight: 400 }}>({unit})</span>
+      </h3>
+      <ResponsiveContainer width="100%" height={200}>
+        <LineChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+          <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#94a3b8' }} />
+          <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} unit={` ${unit}`} />
+          <Tooltip contentStyle={{ borderRadius: 10, border: 'none', boxShadow: '0 4px 16px rgba(0,0,0,0.15)', fontSize: 12 }} />
+          <Line type="monotone" dataKey="value" stroke={color} strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
         </LineChart>
       </ResponsiveContainer>
     </div>
   );
 }
 
-// ─── InsightCard ───────────────────────────────────────────────────────────
-function InsightCard({ type, title, description, action }) {
-  const config = {
-    warning:  { bg: '#fffbeb', border: '#fcd34d', icon: AlertTriangle, color: '#f59e0b' },
-    critical: { bg: '#fff5f5', border: '#fca5a5', icon: AlertCircle,   color: '#dc2626' },
-    success:  { bg: '#f0fdf4', border: '#86efac', icon: CheckCircle,   color: '#16a34a' },
-  };
-  const cfg = config[type] || config.success;
-  const Icon = cfg.icon;
-  return (
-    <div style={{ background: cfg.bg, border: `1.5px solid ${cfg.border}`, borderRadius: 12, padding: '16px 18px', display: 'flex', gap: 12, marginBottom: 12 }}>
-      <Icon size={20} color={cfg.color} style={{ flexShrink: 0, marginTop: 2 }} />
-      <div style={{ flex: 1 }}>
-        <p style={{ fontSize: 13, fontWeight: 800, color: cfg.color, marginBottom: 4 }}>{title}</p>
-        <p style={{ fontSize: 12, color: '#64748b', lineHeight: 1.5, marginBottom: 8 }}>{description}</p>
-        {action && <button style={{ fontSize: 11, fontWeight: 700, color: cfg.color, background: 'white', border: `1px solid ${cfg.border}`, borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit' }}>{action}</button>}
-      </div>
-    </div>
-  );
-}
+// ─── RightsizingInsights — dedicated tab panel ────────────────────────────
+function RightsizingInsights({ servers }) {
+  const rightsizable = useMemo(() => {
+    return servers
+      .map(s => ({ ...s, _rs: computeRightsizing(s) }))
+      .filter(s => s._rs.recommendation !== null)
+      .sort((a, b) => (b._rs.savingsEst || 0) - (a._rs.savingsEst || 0));
+  }, [servers]);
 
-// ─── Insights ──────────────────────────────────────────────────────────────
-function Insights({ servers = [] }) {
-  const realServers = servers.filter(s => s.hasRealData);
+  const totalSavings = useMemo(
+    () => rightsizable.filter(s => s._rs.recommendation === 'downsize').reduce((sum, s) => sum + (s._rs.savingsEst || 0), 0),
+    [rightsizable]
+  );
+
+  const downsizeList = rightsizable.filter(s => s._rs.recommendation === 'downsize');
+  const upsizeList   = rightsizable.filter(s => s._rs.recommendation === 'upsize');
 
   if (servers.length === 0) {
     return (
-      <div style={{ padding: 48, textAlign: 'center', color: '#94a3b8', background: '#fff', borderRadius: 20, border: '1px solid #e2e8f0' }}>
-        <Zap size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
-        <p>Aucune donnée pour générer des insights</p>
+      <div style={{ background: 'white', borderRadius: 16, padding: 60, textAlign: 'center', color: '#94a3b8', border: `1px solid ${T.border}` }}>
+        <Target size={48} style={{ opacity: 0.2, margin: '0 auto 16px', display: 'block' }} />
+        <p style={{ fontSize: 15, fontWeight: 700, color: '#374151' }}>Aucun serveur chargé</p>
       </div>
     );
   }
 
-  if (realServers.length === 0) {
+  const RightsizingRow = ({ s, idx }) => {
+    const rs = s._rs;
+    const isDown = rs.recommendation === 'downsize';
+    const accentColor = isDown ? T.amber : T.red;
+    const bg = isDown ? T.amberBg : T.redBg;
+    const border = isDown ? '#fcd34d' : '#fca5a5';
     return (
-      <div style={{ padding: 48, textAlign: 'center', color: '#94a3b8', background: '#fff', borderRadius: 20, border: '1px solid #e2e8f0' }}>
-        <AlertTriangle size={32} style={{ marginBottom: 12, opacity: 0.4, color: '#f59e0b' }} />
-        <p style={{ fontWeight: 700, color: '#374151', marginBottom: 8 }}>Aucune métrique réelle disponible</p>
-        <p style={{ fontSize: 13 }}>
-          Les serveurs sont listés depuis les coûts, mais aucune donnée CPU/RAM/Disk n'a été ingérée.<br />
-          Vérifiez votre job d'ingestion OVH (<code>POST /resources/</code>).
-        </p>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, padding: '16px 20px', borderBottom: `1px solid ${T.border}`, background: idx % 2 === 0 ? 'white' : '#FAFBFC' }}>
+        <span style={{ fontSize: 12, fontWeight: 800, color: '#94a3b8', width: 24, paddingTop: 2, textAlign: 'center', flexShrink: 0 }}>{idx + 1}</span>
+
+        {/* Server info */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: T.slate }}>
+              {s.name.replace(/\.ovh\.net|\.vps\.ovh\.net/gi, '')}
+            </span>
+            <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 99, background: s.type === 'VPS' ? T.purpleBg : T.blueBg, color: s.type === 'VPS' ? T.purple : T.blue, border: `1px solid ${s.type === 'VPS' ? '#c4b5fd' : '#93c5fd'}` }}>
+              {s.type}
+            </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700, background: bg, color: accentColor, border: `1px solid ${border}` }}>
+              {isDown ? <ArrowDownCircle size={12} /> : <ArrowUpCircle size={12} />}
+              {isDown ? 'Downsize' : 'Upsize requis'}
+            </span>
+          </div>
+
+          {/* Metrics */}
+          <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: 6 }}>
+            <div style={{ fontSize: 11, color: T.muted }}>
+              <span style={{ fontWeight: 700, color: T.slate }}>CPU moy:</span> {s.avgCpu !== null ? s.avgCpu.toFixed(1) + '%' : 'N/A'}
+              {s.peakCpu !== null && <span style={{ color: '#94a3b8' }}> (pic: {s.peakCpu.toFixed(1)}%)</span>}
+            </div>
+            <div style={{ fontSize: 11, color: T.muted }}>
+              <span style={{ fontWeight: 700, color: T.slate }}>RAM utilisée:</span> {s.avgRam > 0 ? s.avgRam.toFixed(1) + ' GB' : 'N/A'}
+              {rs.currentRam > 0 && <span style={{ color: '#94a3b8' }}> / {rs.currentRam} GB provisionnés</span>}
+            </div>
+            {s.avgDisk > 0 && (
+              <div style={{ fontSize: 11, color: T.muted }}>
+                <span style={{ fontWeight: 700, color: T.slate }}>Disk:</span> {s.avgDisk.toFixed(1)} GB
+              </div>
+            )}
+          </div>
+
+          {rs.reason && (
+            <div style={{ fontSize: 11, color: '#94a3b8', fontStyle: 'italic' }}>📊 {rs.reason}</div>
+          )}
+        </div>
+
+        {/* Dates */}
+        <div style={{ minWidth: 130, flexShrink: 0 }}>
+          <DateCell server={s} />
+        </div>
+
+        {/* Recommendation + savings */}
+        <div style={{ minWidth: 160, flexShrink: 0, textAlign: 'right' }}>
+          {s.monthlyCost !== null && (
+            <div style={{ fontSize: 12, color: T.muted, marginBottom: 4 }}>
+              Actuel: <strong style={{ color: T.slate }}>{fmtEuro(s.monthlyCost)} €/mois</strong>
+            </div>
+          )}
+          {rs.targetLabel && (
+            <div style={{ fontSize: 11, fontWeight: 700, color: isDown ? T.amber : T.red, marginBottom: 4 }}>
+              → {rs.targetLabel}
+            </div>
+          )}
+          {rs.savingsEst > 0 && isDown && (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, fontSize: 12, fontWeight: 800, color: T.green, background: T.greenBg, border: '1px solid #6ee7b7' }}>
+              💰 -{fmtEuro(rs.savingsEst)} €/mois
+            </div>
+          )}
+          {rs.savingsEst > 0 && !isDown && (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, fontSize: 12, fontWeight: 800, color: T.red, background: T.redBg, border: '1px solid #fca5a5' }}>
+              +{fmtEuro(rs.savingsEst)} €/mois
+            </div>
+          )}
+        </div>
       </div>
     );
-  }
-
-  const underCount = realServers.filter(s => s.status === 'underutilized').length;
-  const critCount  = realServers.filter(s => s.status === 'critical').length;
-  const optimCount = realServers.filter(s => s.status === 'optimized').length;
-  const estimatedSavings = underCount * 40;
-
-  const insights = [];
-  realServers.forEach(s => {
-    if (s.avgCpu < 10)
-      insights.push({ type: 'warning',  title: `${s.name} est fortement sous-utilisé`,    description: `CPU moyen à ${s.avgCpu.toFixed(1)}% — downsize recommandé pour réduire les coûts.`,        action: 'Envisager un downsize' });
-    else if (s.peakCpu > 85)
-      insights.push({ type: 'critical', title: `${s.name} atteint des pics critiques`,     description: `Peak CPU à ${s.peakCpu.toFixed(1)}% — risque de dégradation des performances.`,            action: 'Envisager un upsize'   });
-    else
-      insights.push({ type: 'success',  title: `${s.name} — usage équilibré`,              description: `CPU moyen à ${s.avgCpu.toFixed(1)}% (peak ${s.peakCpu.toFixed(1)}%) — configuration optimale.` });
-  });
-
-  insights.sort((a, b) => ({ critical: 0, warning: 1, success: 2 }[a.type] - { critical: 0, warning: 1, success: 2 }[b.type]));
+  };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)', borderRadius: 20, padding: '24px 28px', display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 200 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <Zap size={20} color="#fbbf24" />
-            <span style={{ fontSize: 16, fontWeight: 800, color: '#f8fafc' }}>FinOps Intelligence</span>
-          </div>
-          <p style={{ fontSize: 13, color: '#94a3b8', lineHeight: 1.6 }}>
-            Analyse de {realServers.length} serveur{realServers.length !== 1 ? 's' : ''} avec données réelles —{' '}
-            {optimCount} optimisé{optimCount !== 1 ? 's' : ''},{' '}
-            {underCount} sous-utilisé{underCount !== 1 ? 's' : ''},{' '}
-            {critCount} critique{critCount !== 1 ? 's' : ''}.
-          </p>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Summary banner */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 14 }}>
+        <div style={{ background: T.amberBg, borderRadius: 16, border: `1px solid #fcd34d`, padding: '18px 22px' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.amber, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 8 }}>⬇ Downsizing possible</div>
+          <div style={{ fontSize: 28, fontWeight: 900, color: T.amber }}>{downsizeList.length}</div>
+          <div style={{ fontSize: 12, color: T.amber, marginTop: 4 }}>serveurs sur-provisionnés</div>
         </div>
-        {underCount > 0 && (
-          <div style={{ background: '#1B5E4622', border: '1px solid #1B5E4655', borderRadius: 14, padding: '16px 20px', textAlign: 'center' }}>
-            <p style={{ fontSize: 11, fontWeight: 700, color: '#4ade80', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 4 }}>Économies potentielles</p>
-            <p style={{ fontSize: 26, fontWeight: 900, color: '#4ade80', letterSpacing: '-1px' }}>~{estimatedSavings} €</p>
-            <p style={{ fontSize: 11, color: '#86efac' }}>/ mois estimé</p>
+        <div style={{ background: T.greenBg, borderRadius: 16, border: `1px solid #6ee7b7`, padding: '18px 22px' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.green, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 8 }}>💰 Économies estimées</div>
+          <div style={{ fontSize: 28, fontWeight: 900, color: T.green }}>{fmtEuro(totalSavings)} €</div>
+          <div style={{ fontSize: 12, color: T.green, marginTop: 4 }}>par mois si rightsizing appliqué</div>
+        </div>
+        <div style={{ background: T.redBg, borderRadius: 16, border: `1px solid #fca5a5`, padding: '18px 22px' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.red, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 8 }}>⬆ Upsize requis</div>
+          <div style={{ fontSize: 28, fontWeight: 900, color: T.red }}>{upsizeList.length}</div>
+          <div style={{ fontSize: 12, color: T.red, marginTop: 4 }}>serveurs en risque de saturation</div>
+        </div>
+        <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, padding: '18px 22px' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 8 }}>✅ Optimisés</div>
+          <div style={{ fontSize: 28, fontWeight: 900, color: T.slate }}>{servers.length - rightsizable.length}</div>
+          <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>aucune action requise</div>
+        </div>
+      </div>
+
+      {/* Downsize recommendations */}
+      {downsizeList.length > 0 && (
+        <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+          <div style={{ padding: '16px 20px', borderBottom: `1px solid ${T.border}`, background: T.amberBg, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <ArrowDownCircle size={18} color={T.amber} />
+            <span style={{ fontSize: 14, fontWeight: 800, color: T.amber }}>Serveurs à réduire (Downsize)</span>
+            <span style={{ fontSize: 11, fontWeight: 700, background: T.amber, color: 'white', borderRadius: 99, padding: '2px 8px' }}>{downsizeList.length}</span>
           </div>
+          {downsizeList.map((s, i) => <RightsizingRow key={s.id} s={s} idx={i} />)}
+        </div>
+      )}
+
+      {/* Upsize recommendations */}
+      {upsizeList.length > 0 && (
+        <div style={{ background: 'white', borderRadius: 16, border: `1px solid #fca5a5`, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+          <div style={{ padding: '16px 20px', borderBottom: `1px solid #fca5a5`, background: T.redBg, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <ArrowUpCircle size={18} color={T.red} />
+            <span style={{ fontSize: 14, fontWeight: 800, color: T.red }}>Serveurs à agrandir (Upsize)</span>
+            <span style={{ fontSize: 11, fontWeight: 700, background: T.red, color: 'white', borderRadius: 99, padding: '2px 8px' }}>{upsizeList.length}</span>
+          </div>
+          {upsizeList.map((s, i) => <RightsizingRow key={s.id} s={s} idx={i} />)}
+        </div>
+      )}
+
+      {rightsizable.length === 0 && (
+        <div style={{ background: 'white', borderRadius: 16, padding: 60, textAlign: 'center', border: `1px solid ${T.border}` }}>
+          <CheckCircle size={48} color={T.green} style={{ margin: '0 auto 16px', display: 'block', opacity: 0.5 }} />
+          <p style={{ fontSize: 15, fontWeight: 700, color: T.slate }}>Toute la flotte est optimisée 🎉</p>
+          <p style={{ fontSize: 13, color: T.muted, marginTop: 8 }}>Aucun serveur ne nécessite de rightsizing pour l'instant</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── RenewalCalendar — servers expiring soon ──────────────────────────────
+function RenewalCalendar({ servers }) {
+  const upcoming = useMemo(() => {
+    return servers
+      .map(s => {
+        const renewalDate = s.renewalDate || s.expirationDate;
+        const days = daysUntil(renewalDate);
+        return { ...s, _renewalDate: renewalDate, _daysLeft: days };
+      })
+      .filter(s => s._renewalDate && s._daysLeft !== null && s._daysLeft <= 90 && s._daysLeft >= -7)
+      .sort((a, b) => a._daysLeft - b._daysLeft);
+  }, [servers]);
+
+  const noDateServers = servers.filter(s => !s.renewalDate && !s.expirationDate && !s.creationDate && !s.firstInvoiceDate);
+
+  if (upcoming.length === 0 && noDateServers.length === 0) return null;
+
+  return (
+    <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+      <div style={{ padding: '16px 20px', borderBottom: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Clock size={18} color={T.amber} />
+        <span style={{ fontSize: 14, fontWeight: 800, color: T.slate }}>Renouvellements à venir (90 jours)</span>
+        {upcoming.length > 0 && (
+          <span style={{ fontSize: 11, fontWeight: 700, background: T.amber, color: 'white', borderRadius: 99, padding: '2px 8px' }}>{upcoming.length}</span>
         )}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 14 }}>
-        {insights.map((ins, i) => <InsightCard key={i} {...ins} />)}
+      {upcoming.length === 0 ? (
+        <div style={{ padding: '24px 20px', color: T.muted, fontSize: 13 }}>
+          Aucun renouvellement dans les 90 prochains jours avec données disponibles.
+          {noDateServers.length > 0 && (
+            <span style={{ marginLeft: 8, fontSize: 11, color: '#94a3b8' }}>({noDateServers.length} serveur(s) sans date — configurez l'API OVH pour récupérer les dates automatiquement)</span>
+          )}
+        </div>
+      ) : (
+        <div>
+          {upcoming.map((s, i) => {
+            const days = s._daysLeft;
+            const color = days < 0 ? T.red : days < 7 ? T.red : days < 30 ? T.amber : T.green;
+            const bg    = days < 0 ? T.redBg : days < 7 ? T.redBg : days < 30 ? T.amberBg : T.greenBg;
+            return (
+              <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 20px', borderBottom: i < upcoming.length - 1 ? `1px solid ${T.border}` : 'none', background: i % 2 === 0 ? 'white' : '#FAFBFC' }}>
+                <div style={{ width: 52, height: 52, borderRadius: 12, background: bg, border: `2px solid ${color}`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <span style={{ fontSize: 16, fontWeight: 900, color, lineHeight: 1 }}>{Math.abs(days)}</span>
+                  <span style={{ fontSize: 8, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.05em' }}>{days < 0 ? 'expiré' : 'jours'}</span>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: T.slate, marginBottom: 2 }}>
+                    {s.name.replace(/\.ovh\.net|\.vps\.ovh\.net/gi, '')}
+                  </div>
+                  <div style={{ fontSize: 11, color: T.muted }}>
+                    Renouvellement: <strong style={{ color }}>{fmtDate(s._renewalDate)}</strong>
+                    {s.creationDate && <span style={{ marginLeft: 10, color: '#94a3b8' }}>· Créé le {fmtDate(s.creationDate)}</span>}
+                  </div>
+                </div>
+                {s.monthlyCost !== null && (
+                  <div style={{ fontWeight: 800, fontSize: 13, color: T.green, whiteSpace: 'nowrap' }}>
+                    {fmtEuro(s.monthlyCost)} €/mois
+                  </div>
+                )}
+                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 99, background: s.type === 'VPS' ? T.purpleBg : T.blueBg, color: s.type === 'VPS' ? T.purple : T.blue, border: `1px solid ${s.type === 'VPS' ? '#c4b5fd' : '#93c5fd'}`, whiteSpace: 'nowrap' }}>
+                  {s.type}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── FinOps Insights ──────────────────────────────────────────────────────
+function Insights({ servers }) {
+  const withCost = servers.filter(s => s.monthlyCost !== null && s.monthlyCost > 0);
+  const wasteful = servers.filter(s => s.status === 'underutilized' && s.monthlyCost !== null);
+  const wastefulCost = wasteful.reduce((s, x) => s + (x.monthlyCost || 0), 0);
+  const totalCost    = withCost.reduce((s, x) => s + (x.monthlyCost || 0), 0);
+  const topCostServers = [...withCost].sort((a, b) => (b.monthlyCost || 0) - (a.monthlyCost || 0)).slice(0, 10);
+
+  const vpsTotal  = withCost.filter(s => s.type === 'VPS').reduce((s, x) => s + (x.monthlyCost || 0), 0);
+  const dedTotal  = withCost.filter(s => s.type === 'Dedicated').reduce((s, x) => s + (x.monthlyCost || 0), 0);
+  const costByType = [
+    { name: 'VPS', value: vpsTotal, color: T.purple },
+    { name: 'Dedicated', value: dedTotal, color: T.blue },
+  ].filter(x => x.value > 0);
+  const COLORS = [T.purple, T.blue, T.green, T.amber, T.red];
+
+  const ramDist = { '≤8 GB': 0, '16 GB': 0, '32 GB': 0, '64 GB': 0, '128+ GB': 0 };
+  servers.forEach(s => {
+    const r = s.peakRam;
+    if (r <= 8) ramDist['≤8 GB']++;
+    else if (r <= 16) ramDist['16 GB']++;
+    else if (r <= 32) ramDist['32 GB']++;
+    else if (r <= 64) ramDist['64 GB']++;
+    else ramDist['128+ GB']++;
+  });
+  const ramChartData = Object.entries(ramDist).map(([k, v]) => ({ name: k, count: v })).filter(x => x.count > 0);
+
+  if (servers.length === 0) {
+    return (
+      <div style={{ background: 'white', borderRadius: 16, padding: 60, textAlign: 'center', color: '#94a3b8', border: `1px solid ${T.border}` }}>
+        <Target size={48} style={{ opacity: 0.2, margin: '0 auto 16px', display: 'block' }} />
+        <p style={{ fontSize: 15, fontWeight: 700, color: '#374151' }}>Aucun serveur chargé</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Renewal calendar */}
+      <RenewalCalendar servers={servers} />
+
+      {/* FinOps KPIs */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14 }}>
+        <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, padding: '18px 22px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>💸 Coût mensuel total</div>
+          <div style={{ fontSize: 28, fontWeight: 900, color: T.slate }}>{fmtEuro(totalCost)} <span style={{ fontSize: 14, fontWeight: 600, color: T.muted }}>€</span></div>
+          <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>{withCost.length} serveurs avec coût</div>
+        </div>
+        <div style={{ background: 'white', borderRadius: 16, border: `1px solid #fcd34d`, padding: '18px 22px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.amber, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>⚠ Coût gaspillé (downsize)</div>
+          <div style={{ fontSize: 28, fontWeight: 900, color: T.amber }}>{fmtEuro(wastefulCost)} <span style={{ fontSize: 14, fontWeight: 600 }}>€</span></div>
+          <div style={{ fontSize: 12, color: T.amber, marginTop: 4 }}>{wasteful.length} serveurs · {totalCost > 0 ? ((wastefulCost / totalCost) * 100).toFixed(1) : 0}% du budget</div>
+        </div>
+        <div style={{ background: 'white', borderRadius: 16, border: `1px solid #6ee7b7`, padding: '18px 22px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.green, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>✅ Économies potentielles</div>
+          <div style={{ fontSize: 28, fontWeight: 900, color: T.green }}>{fmtEuro(wastefulCost * 0.4)} <span style={{ fontSize: 14, fontWeight: 600 }}>€</span></div>
+          <div style={{ fontSize: 12, color: T.green, marginTop: 4 }}>Estimation ~40% via rightsizing</div>
+        </div>
+        <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, padding: '18px 22px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>📊 Coût moyen / serveur</div>
+          <div style={{ fontSize: 28, fontWeight: 900, color: T.slate }}>{withCost.length > 0 ? fmtEuro(totalCost / withCost.length) : '—'} <span style={{ fontSize: 14, fontWeight: 600, color: T.muted }}>€</span></div>
+          <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>Par mois · {servers.length} serveurs au total</div>
+        </div>
+      </div>
+
+      {/* Top coûts + pie */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
+        <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, padding: '20px 24px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+          <h3 style={{ fontSize: 14, fontWeight: 800, color: T.slate, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <DollarSign size={16} color={T.green} /> Top 10 serveurs par coût mensuel
+          </h3>
+          {topCostServers.length === 0 ? (
+            <p style={{ color: T.muted, fontSize: 13 }}>Aucune donnée de coût disponible</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {topCostServers.map((s, i) => {
+                const pct = totalCost > 0 ? (s.monthlyCost / totalCost) * 100 : 0;
+                const barColor = s.status === 'underutilized' ? T.amber : s.status === 'critical' ? T.red : T.green;
+                return (
+                  <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', width: 18, textAlign: 'right' }}>{i + 1}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: T.slate, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 260 }}>
+                          {s.name.replace(/\.ovh\.net|\.vps\.ovh\.net/gi, '')}
+                        </span>
+                        <span style={{ fontSize: 12, fontWeight: 800, color: barColor, whiteSpace: 'nowrap', marginLeft: 8 }}>
+                          {fmtEuro(s.monthlyCost)} €
+                        </span>
+                      </div>
+                      <div style={{ height: 5, borderRadius: 99, background: '#F1F5F9', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${pct}%`, background: barColor, borderRadius: 99, transition: 'width 0.6s ease' }} />
+                      </div>
+                    </div>
+                    <span style={{ fontSize: 10, color: '#94a3b8', width: 36, textAlign: 'right' }}>{pct.toFixed(1)}%</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, padding: '20px 24px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)', display: 'flex', flexDirection: 'column' }}>
+          <h3 style={{ fontSize: 14, fontWeight: 800, color: T.slate, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Layers size={16} color={T.blue} /> Coût VPS vs Dédié
+          </h3>
+          {costByType.length > 0 ? (
+            <>
+              <ResponsiveContainer width="100%" height={160}>
+                <PieChart>
+                  <Pie data={costByType} cx="50%" cy="50%" innerRadius={45} outerRadius={70} paddingAngle={3} dataKey="value">
+                    {costByType.map((entry, index) => <Cell key={index} fill={COLORS[index % COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip formatter={(v) => [`${fmtEuro(v)} €`, 'Coût']} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+                {costByType.map((d, i) => (
+                  <div key={d.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ width: 10, height: 10, borderRadius: '50%', background: COLORS[i] }} />
+                      <span style={{ fontSize: 12, color: T.muted }}>{d.name}</span>
+                    </div>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: T.slate }}>{fmtEuro(d.value)} €</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : <p style={{ color: T.muted, fontSize: 13 }}>Aucune donnée de coût</p>}
+        </div>
+      </div>
+
+      {/* RAM distribution */}
+      <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, padding: '20px 24px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+        <h3 style={{ fontSize: 14, fontWeight: 800, color: T.slate, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <MemoryStick size={16} color={T.purple} /> Distribution RAM de la flotte
+        </h3>
+        <ResponsiveContainer width="100%" height={180}>
+          <BarChart data={ramChartData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <XAxis dataKey="name" tick={{ fontSize: 12, fill: T.muted }} />
+            <YAxis tick={{ fontSize: 11, fill: T.muted }} allowDecimals={false} />
+            <Tooltip contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+            <Bar dataKey="count" name="Serveurs" radius={[6, 6, 0, 0]}>
+              {ramChartData.map((_, i) => <Cell key={i} fill={['#c4b5fd', '#a78bfa', '#8b5cf6', '#7c3aed', '#5b21b6'][i % 5]} />)}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );
 }
 
-// ─── Main Component ────────────────────────────────────────────────────────
+// ─── Main ResourceDashboard Component ─────────────────────────────────────
 export default function ResourceDashboard() {
-  const [activeTab,      setActiveTab]      = useState('servers');
-  const [servers,        setServers]        = useState([]);
-  const [selectedServer, setSelectedServer] = useState(null);
-  const [search,         setSearch]         = useState('');
-  const [typeFilter,     setTypeFilter]     = useState('all');
-  const [statusFilter,   setStatusFilter]   = useState('all');
-  const [loading,        setLoading]        = useState(true);
-  const [error,          setError]          = useState(null);
-  const [chartsLoading,  setChartsLoading]  = useState(false);
-  const [timeSeriesData, setTimeSeriesData] = useState([]);
-  const cacheRef = useRef({});
+  const [servers,       setServers]       = useState([]);
+  const [loading,       setLoading]       = useState(true);
+  const [error,         setError]         = useState(null);
+  const [search,        setSearch]        = useState('');
+  const [typeFilter,    setTypeFilter]    = useState('all');
+  const [activeTab,     setActiveTab]     = useState('servers');
+  const [selectedServer,setSelectedServer]= useState(null);
+  const [timeSeriesData,setTimeSeriesData]= useState([]);
+  const [chartsLoading, setChartsLoading] = useState(false);
 
-  // ── Load server list ─────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
-      cacheRef.current = {}; // clear time-series cache on refresh
-
-      const [costsResult, summariesResult] = await Promise.allSettled([
-        costsService.getCosts(0, 5000),
+      // Fetch all data in parallel including OVH info
+      const [summaries, costs, ovhInfoList] = await Promise.all([
         resourcesService.getAllServersSummary(),
+        costsService.getAllCosts().catch(() => []),
+        ovhService.getAllServersInfo().catch(() => []), // graceful fallback
       ]);
 
-      const costs     = costsResult.status     === 'fulfilled' ? (costsResult.value     ?? []) : [];
-      const summaries = summariesResult.status === 'fulfilled' ? (summariesResult.value ?? []) : [];
+      const rawServers   = buildServerList(summaries);
+      const costMap      = buildCostMap(costs);
+      const withCosts    = enrichServersWithCosts(rawServers, costMap);
+      // Enrich with OVH dates (creation, expiration, offer)
+      const enriched     = enrichServersWithOvhInfo(withCosts, ovhInfoList);
 
-      if (summariesResult.status === 'rejected') {
-        console.warn('Resource summaries endpoint unavailable:', summariesResult.reason);
-      }
-
-      const serverList = buildServerList(costs, summaries);
-      setServers(serverList);
-      if (serverList.length > 0 && !selectedServer) {
-        setSelectedServer(serverList[0]);
-      }
-    } catch (err) {
-      console.error('Dashboard load error:', err);
-      setError('Impossible de charger les données. Vérifiez votre connexion API.');
+      setServers(enriched);
+      if (!selectedServer && enriched.length > 0) setSelectedServer(enriched[0]);
+    } catch (e) {
+      setError(e?.response?.data?.detail || e.message || 'Erreur lors du chargement');
     } finally {
       setLoading(false);
     }
@@ -555,158 +1221,156 @@ export default function ResourceDashboard() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // ── Load time-series when server/tab changes ─────────────────────────────
   useEffect(() => {
     if (!selectedServer || activeTab !== 'charts') return;
-
-    const load = async () => {
-      const key = selectedServer.name;
-      if (cacheRef.current[key]) {
-        setTimeSeriesData(cacheRef.current[key]);
-        return;
-      }
+    let cancelled = false;
+    (async () => {
+      setChartsLoading(true);
+      setTimeSeriesData([]);
       try {
-        setChartsLoading(true);
-        const raw = await resourcesService.getServerTimeSeries(selectedServer.name, 7);
-        const data = (raw || [])
-          .map(d => ({
-            timestamp:  d.recorded_at || d.timestamp,
-            cpu_usage:  parseFloat(d.cpu_usage  || 0),
-            ram_usage:  parseFloat(d.ram_usage  || 0),
-            disk_usage: parseFloat(d.disk_usage || 0),
-          }))
-          .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-        cacheRef.current[key] = data;
-        setTimeSeriesData(data);
-      } catch (err) {
-        console.error('Time series error:', err);
-        setTimeSeriesData([]);
-      } finally {
-        setChartsLoading(false);
-      }
-    };
+        const data = await resourcesService.getServerTimeSeries(selectedServer.name, 7);
+        if (!cancelled) setTimeSeriesData(data);
+      } catch { if (!cancelled) setTimeSeriesData([]); }
+      finally   { if (!cancelled) setChartsLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedServer, activeTab]);
 
-    load();
-  }, [selectedServer?.name, activeTab]);
+  const handleServerSelect = useCallback(srv => {
+    setSelectedServer(srv);
+    setActiveTab('charts');
+  }, []);
 
-  // ── Filtering ────────────────────────────────────────────────────────────
-  const filteredServers = servers.filter(s => {
-    const q = search.toLowerCase();
-    return (
-      (s.name.toLowerCase().includes(q) || (s.reference || '').toLowerCase().includes(q)) &&
-      (typeFilter   === 'all' || s.type   === typeFilter) &&
-      (statusFilter === 'all' || s.status === statusFilter)
-    );
-  });
+  const filteredServers = useMemo(() => {
+    let list = servers;
+    if (typeFilter !== 'all') list = list.filter(s => s.type === typeFilter);
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(s => s.name.toLowerCase().includes(q));
+    }
+    return list;
+  }, [servers, typeFilter, search]);
 
-  const summary = generateSummary(filteredServers);
+  const summary = useMemo(() => generateSummary(filteredServers), [filteredServers]);
+
+  const rightsizingCount = useMemo(
+    () => filteredServers.filter(s => computeRightsizing(s).recommendation !== null).length,
+    [filteredServers]
+  );
+
+  const renewalSoonCount = useMemo(
+    () => filteredServers.filter(s => {
+      const d = daysUntil(s.renewalDate || s.expirationDate);
+      return d !== null && d <= 30 && d >= 0;
+    }).length,
+    [filteredServers]
+  );
 
   const tabs = [
-    { id: 'servers',  label: 'Serveurs',       icon: Server,    desc: 'Liste complète'  },
-    { id: 'charts',   label: 'Métriques',       icon: BarChart2, desc: 'Time-series'     },
-    { id: 'insights', label: 'Insights FinOps', icon: Zap,       desc: 'Recommandations' },
+    { id: 'servers',     label: 'Serveurs',        icon: Server,    count: null },
+    { id: 'charts',      label: 'Métriques',        icon: BarChart2, count: null },
+    { id: 'insights',    label: 'Insights FinOps',  icon: Zap,       count: renewalSoonCount },
   ];
 
-  const handleServerSelect = server => {
-    setSelectedServer(server);
-    setActiveTab('charts');
-  };
-
-  // ── Render ───────────────────────────────────────────────────────────────
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: '#F8FAFC' }}>
+    <div style={{ display: 'flex', minHeight: '100vh', background: T.bg, fontFamily: "'Inter', -apple-system, sans-serif" }}>
       <Sidebar />
-
-      <div style={{ flex: 1, marginLeft: '260px', padding: '28px 32px' }}>
+      <div style={{ flex: 1, overflow: 'auto', padding: '0 32px 40px', minWidth: 0, marginLeft: 240 }}>
         <Header />
 
         {/* Page header */}
-        <div style={{ marginBottom: 32 }}>
+        <div style={{ marginBottom: 28 }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 24, flexWrap: 'wrap', gap: 16 }}>
             <div>
-              <h1 style={{ fontSize: 32, fontWeight: 900, color: '#0F172A', letterSpacing: '-1px', marginBottom: 6 }}>📊 Resource Dashboard</h1>
-              <p style={{ color: '#64748B', fontSize: 15 }}>FinOps – Server Optimization • VPS &amp; Dedicated • Cost control &amp; rightsizing</p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+                <div style={{ width: 40, height: 40, borderRadius: 12, background: T.green, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: `0 4px 12px ${T.green}55` }}>
+                  <Layers size={20} color="white" />
+                </div>
+                <h1 style={{ fontSize: 28, fontWeight: 900, color: T.slate, letterSpacing: '-0.5px' }}>Resource Dashboard</h1>
+              </div>
+              <p style={{ color: T.muted, fontSize: 14, marginLeft: 52 }}>
+                FinOps · Optimisation serveurs · VPS &amp; Dedicated · Rightsizing · Dates de renouvellement
+              </p>
             </div>
-            <button disabled={loading} onClick={loadData}
-              style={{ padding: '12px 24px', background: loading ? '#f1f5f9' : '#1B5E46', color: loading ? '#94a3b8' : 'white', border: 'none', borderRadius: 12, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8, cursor: loading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', fontSize: 14 }}>
-              <RefreshCw size={16} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
+            <button
+              disabled={loading}
+              onClick={loadData}
+              style={{ padding: '11px 22px', background: loading ? '#f1f5f9' : T.green, color: loading ? '#94a3b8' : 'white', border: 'none', borderRadius: 10, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8, cursor: loading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', fontSize: 14, transition: 'background .15s' }}
+            >
+              <RefreshCw size={15} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
               {loading ? 'Chargement...' : 'Rafraîchir'}
             </button>
           </div>
 
-          {/* Error banner */}
           {error && (
-            <div style={{ background: '#fff5f5', border: '1.5px solid #fca5a5', borderRadius: 12, padding: '14px 18px', color: '#dc2626', fontSize: 13, fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ background: '#fff5f5', border: '1.5px solid #fca5a5', borderRadius: 12, padding: '14px 18px', color: T.red, fontSize: 13, fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
               <AlertCircle size={18} /> {error}
             </div>
           )}
 
           {/* Summary cards */}
           {filteredServers.length > 0 && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 14, marginBottom: 8 }}>
-              <SummaryCard label="Coût Total" value={`${fmt2(summary.totalCost)} €`} sub={`${filteredServers.length} serveur${filteredServers.length !== 1 ? 's' : ''}`} color="#1B5E46" bg="#f0fdf4" icon={TrendingUp} />
-              <SummaryCard label="CPU Moyen"  value={summary.avgCpu.toFixed(1)}       sub="%"  color="#2563eb" bg="#eff6ff" icon={Zap}      />
-              <SummaryCard label="RAM Moyen"  value={summary.avgRam.toFixed(1)}       sub="GB" color="#8b5cf6" bg="#f5f3ff" icon={Activity} />
-              <SummaryCard label="Optimisés"  value={summary.optimized} sub={`/${summary.total}`} color="#16a34a" bg="#f0fdf4" icon={Server}
-                trend={summary.total > 0 ? (summary.optimized / summary.total) * 100 : 0}
-              />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 8 }}>
+              <SummaryCard label="Serveurs" value={filteredServers.length} sub={`${filteredServers.filter(s => s.type === 'VPS').length} VPS · ${filteredServers.filter(s => s.type === 'Dedicated').length} Dédiés`} accentColor={T.green} bgColor={T.greenBg} icon={Server} />
+              <SummaryCard label="Disk Moyen" value={summary.avgDisk.toFixed(1)} sub="GB" accentColor={T.blue} bgColor={T.blueBg} icon={HardDrive} />
+              <SummaryCard label="RAM Moyen" value={summary.avgRam.toFixed(1)} sub="GB" accentColor={T.purple} bgColor={T.purpleBg} icon={Activity} />
+              <SummaryCard label="Coût mensuel" value={summary.totalMonthlyCost > 0 ? fmtEuro(summary.totalMonthlyCost) : '—'} sub={summary.totalMonthlyCost > 0 ? `€ · ${summary.serversWithCost} serveurs` : 'Aucune donnée'} accentColor="#059669" bgColor="#D1FAE5" icon={DollarSign} />
+              <SummaryCard label="À optimiser" value={summary.underutilized} sub={`${summary.underutilized} downsize · ${summary.critical} upsize`} accentColor={T.amber} bgColor={T.amberBg} icon={AlertTriangle} />
+              {renewalSoonCount > 0 && (
+                <SummaryCard label="Renouvellement < 30j" value={renewalSoonCount} sub="serveurs à renouveler" accentColor={renewalSoonCount > 0 ? T.red : T.green} bgColor={renewalSoonCount > 0 ? T.redBg : T.greenBg} icon={Clock} />
+              )}
             </div>
           )}
         </div>
 
         {/* Tabs */}
-        <div style={{ display: 'flex', gap: 8, marginBottom: 24, borderBottom: '2px solid #E2E8F0', overflowX: 'auto', paddingBottom: 4 }}>
-          {tabs.map(tab => (
-            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-              style={{ padding: '14px 24px', borderRadius: '12px 12px 0 0', fontWeight: 700, fontSize: 14, background: activeTab === tab.id ? '#FFFFFF' : 'transparent', border: activeTab === tab.id ? '2px solid #1B5E46' : '2px solid transparent', color: activeTab === tab.id ? '#1B5E46' : '#64748B', display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s', whiteSpace: 'nowrap' }}>
-              <tab.icon size={18} /> {tab.label}
-            </button>
-          ))}
+        <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: `2px solid ${T.border}`, overflowX: 'auto', paddingBottom: 0 }}>
+          {tabs.map(tab => {
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                style={{ padding: '12px 20px', borderRadius: '10px 10px 0 0', fontWeight: 700, fontSize: 13, background: isActive ? 'white' : 'transparent', border: isActive ? `2px solid ${T.border}` : '2px solid transparent', borderBottom: isActive ? '2px solid white' : '2px solid transparent', marginBottom: isActive ? '-2px' : 0, color: isActive ? T.green : T.muted, display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s', whiteSpace: 'nowrap' }}
+              >
+                <tab.icon size={16} /> {tab.label}
+                {tab.count > 0 && (
+                  <span style={{ background: tab.id === 'rightsizing' ? T.amber : T.red, color: 'white', borderRadius: 99, padding: '1px 7px', fontSize: 10, fontWeight: 800, marginLeft: 2 }}>
+                    {tab.count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
         {/* SERVERS TAB */}
         {activeTab === 'servers' && (
-          <div style={{ background: '#FFFFFF', borderRadius: 20, border: '1px solid #E2E8F0', boxShadow: '0 10px 30px rgba(0,0,0,0.06)', overflow: 'hidden', animation: 'fadeIn .3s ease' }}>
-            <div style={{ padding: '20px 24px', borderBottom: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-              {/* Search */}
-              <div style={{ position: 'relative', flex: 1, maxWidth: 420, minWidth: 200 }}>
-                <Search size={18} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: '#94A3B8' }} />
-                <input type="text" placeholder="Rechercher un serveur ou une référence..." value={search} onChange={e => setSearch(e.target.value)}
-                  style={{ width: '100%', padding: '12px 14px 12px 48px', borderRadius: 12, border: '1.5px solid #E2E8F0', fontSize: 14, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box', transition: 'border-color .15s' }}
-                  onFocus={e => (e.target.style.borderColor = '#1B5E46')}
-                  onBlur={e  => (e.target.style.borderColor = '#E2E8F0')}
+          <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, boxShadow: '0 4px 20px rgba(0,0,0,0.06)', overflow: 'hidden', animation: 'fadeIn .3s ease' }}>
+            <div style={{ padding: '18px 20px', borderBottom: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', background: '#FAFBFC' }}>
+              <div style={{ position: 'relative', flex: 1, maxWidth: 400, minWidth: 200 }}>
+                <Search size={15} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#94A3B8' }} />
+                <input
+                  type="text"
+                  placeholder="Rechercher un serveur..."
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  style={{ width: '100%', padding: '10px 12px 10px 38px', borderRadius: 10, border: `1.5px solid ${T.border}`, fontSize: 13, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box', transition: 'border-color .15s', background: 'white' }}
+                  onFocus={e => (e.target.style.borderColor = T.green)}
+                  onBlur={e  => (e.target.style.borderColor = T.border)}
                 />
               </div>
-
-              {/* Type filter */}
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {['all', 'VPS', 'Dedicated'].map(t => (
-                  <button key={t} onClick={() => setTypeFilter(t)}
-                    style={{ padding: '10px 18px', borderRadius: 9999, fontWeight: 700, fontSize: 13, background: typeFilter === t ? (t === 'VPS' ? '#F3E8FF' : '#EFF6FF') : '#F8FAFC', color: typeFilter === t ? (t === 'VPS' ? '#7C3AED' : '#2563EB') : '#64748B', border: typeFilter === t ? `2px solid ${t === 'VPS' ? '#c4b5fd' : '#93c5fd'}` : '1px solid #E2E8F0', cursor: 'pointer', fontFamily: 'inherit' }}>
-                    {t === 'all' ? 'Tous' : t === 'VPS' ? '🖥️ VPS' : '🗄️ Dédiés'}
+              <div style={{ display: 'flex', gap: 6 }}>
+                {[{ id: 'all', label: 'Tous' }, { id: 'VPS', label: '🖥️ VPS' }, { id: 'Dedicated', label: '🗄️ Dédiés' }].map(btn => (
+                  <button key={btn.id} onClick={() => setTypeFilter(btn.id)} style={{ padding: '8px 16px', borderRadius: 99, fontWeight: 700, fontSize: 12, background: typeFilter === btn.id ? T.green : 'white', color: typeFilter === btn.id ? 'white' : T.muted, border: typeFilter === btn.id ? `1.5px solid ${T.green}` : `1.5px solid ${T.border}`, cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s' }}>
+                    {btn.label}
                   </button>
                 ))}
               </div>
-
-              {/* Status filter */}
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {['all', 'optimized', 'underutilized', 'critical'].map(s => {
-                  const lbl = s === 'all' ? 'Tous' : s === 'optimized' ? '✅ Optimisé' : s === 'underutilized' ? '⚠️ Sous-utilisé' : '🔴 Critique';
-                  const on  = statusFilter === s;
-                  return (
-                    <button key={s} onClick={() => setStatusFilter(s)}
-                      style={{ padding: '8px 14px', borderRadius: 9999, fontWeight: 700, fontSize: 12, background: on ? '#f0fdf4' : '#f8fafc', color: on ? '#16a34a' : '#64748b', border: on ? '1.5px solid #86efac' : '1px solid #e2e8f0', cursor: 'pointer', fontFamily: 'inherit' }}>
-                      {lbl}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 700, color: '#64748B' }}>
+              <div style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 700, color: T.muted, background: T.bg, padding: '6px 12px', borderRadius: 8, border: `1px solid ${T.border}` }}>
                 {filteredServers.length} serveur{filteredServers.length !== 1 ? 's' : ''}
               </div>
             </div>
-
             <ServerTable servers={filteredServers} loading={loading} onServerSelect={handleServerSelect} />
           </div>
         )}
@@ -716,39 +1380,59 @@ export default function ResourceDashboard() {
           <div style={{ animation: 'fadeIn .3s ease' }}>
             {selectedServer ? (
               <>
-                <div style={{ background: 'white', borderRadius: 16, padding: '20px 24px', marginBottom: 20, border: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
+                <div style={{ background: 'white', borderRadius: 14, padding: '18px 22px', marginBottom: 18, border: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16, boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
                   <div>
-                    <h2 style={{ fontSize: 18, fontWeight: 800, color: '#0f172a', marginBottom: 6 }}>{selectedServer.name}</h2>
+                    <h2 style={{ fontSize: 17, fontWeight: 800, color: T.slate, marginBottom: 5 }}>{selectedServer.name}</h2>
                     <p style={{ fontSize: 12, color: '#94a3b8' }}>
                       {selectedServer.hasRealData
-                        ? `CPU avg: ${selectedServer.avgCpu.toFixed(1)}% | Peak: ${selectedServer.peakCpu.toFixed(1)}% | RAM avg: ${selectedServer.avgRam.toFixed(1)} GB`
-                        : "Aucune métrique disponible — vérifiez l'ingestion OVH"}
+                        ? `RAM moy: ${selectedServer.avgRam.toFixed(1)} GB · Disk moy: ${selectedServer.avgDisk.toFixed(1)} GB`
+                        : 'Aucune métrique disponible'}
+                      {selectedServer.monthlyCost !== null && (
+                        <span style={{ marginLeft: 12, color: T.green, fontWeight: 700 }}>
+                          💰 {fmtEuro(selectedServer.monthlyCost)} €/mois
+                        </span>
+                      )}
+                      {(selectedServer.creationDate || selectedServer.firstInvoiceDate) && (
+                        <span style={{ marginLeft: 12, color: T.muted }}>
+                          📅 Créé: {fmtDate(selectedServer.creationDate || selectedServer.firstInvoiceDate)}
+                        </span>
+                      )}
+                      {(selectedServer.renewalDate || selectedServer.expirationDate) && (
+                        <span style={{ marginLeft: 12, color: T.amber, fontWeight: 600 }}>
+                          🔄 Renouvellement: {fmtDate(selectedServer.renewalDate || selectedServer.expirationDate)}
+                        </span>
+                      )}
                     </p>
                   </div>
-                  <select value={selectedServer.name}
+                  <select
+                    value={selectedServer.name}
                     onChange={e => { const srv = servers.find(s => s.name === e.target.value); if (srv) setSelectedServer(srv); }}
-                    style={{ padding: '10px 16px', borderRadius: 8, border: '1.5px solid #e2e8f0', fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', background: 'white', color: '#0f172a' }}>
+                    style={{ padding: '9px 14px', borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', background: 'white', color: T.slate }}
+                  >
                     {servers.map(s => <option key={s.name} value={s.name}>{s.name} ({s.type})</option>)}
                   </select>
                 </div>
-
                 {chartsLoading ? (
-                  <div style={{ background: 'white', borderRadius: 16, padding: 80, textAlign: 'center', color: '#94a3b8' }}>
+                  <div style={{ background: 'white', borderRadius: 16, padding: 80, textAlign: 'center', color: '#94a3b8', border: `1px solid ${T.border}` }}>
                     <RefreshCw size={32} style={{ opacity: 0.3, margin: '0 auto 12px', display: 'block', animation: 'spin 2s linear infinite' }} />
-                    Chargement des métriques...
+                    <p style={{ marginTop: 8, fontSize: 14 }}>Chargement des métriques...</p>
+                  </div>
+                ) : timeSeriesData.length === 0 ? (
+                  <div style={{ background: 'white', borderRadius: 16, padding: 60, textAlign: 'center', color: '#94a3b8', border: `1px solid ${T.border}` }}>
+                    <Activity size={48} style={{ opacity: 0.15, margin: '0 auto 16px', display: 'block' }} />
+                    <p style={{ fontSize: 14, fontWeight: 600 }}>Aucune donnée temps réel disponible</p>
                   </div>
                 ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(500px, 1fr))', gap: 16 }}>
-                    <ResourceChart data={timeSeriesData} metricKey="cpu_usage"  label="CPU Usage"  unit="%" color="#2563eb" />
-                    <ResourceChart data={timeSeriesData} metricKey="ram_usage"  label="RAM Usage"  unit="GB" color="#8b5cf6" />
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(480px, 1fr))', gap: 16 }}>
+                    <ResourceChart data={timeSeriesData} metricKey="cpu_usage"  label="CPU Usage"  unit="%" color={T.blue} />
+                    <ResourceChart data={timeSeriesData} metricKey="ram_usage"  label="RAM Usage"  unit="GB" color={T.purple} />
                     <ResourceChart data={timeSeriesData} metricKey="disk_usage" label="Disk Usage" unit="GB" color="#f97316" />
                   </div>
                 )}
               </>
             ) : (
-              <div style={{ background: 'white', borderRadius: 16, padding: 80, textAlign: 'center', color: '#94a3b8' }}>
-                <BarChart2 size={48} style={{ opacity: 0.2, margin: '0 auto 16px', display: 'block' }} />
-                <p style={{ fontSize: 15, fontWeight: 700, color: '#374151' }}>Sélectionnez un serveur pour voir les métriques</p>
+              <div style={{ background: 'white', borderRadius: 16, padding: 80, textAlign: 'center', color: '#94a3b8', border: `1px solid ${T.border}` }}>
+                <p style={{ fontSize: 15, fontWeight: 700, color: '#374151' }}>Sélectionnez un serveur depuis l'onglet Serveurs</p>
               </div>
             )}
           </div>
@@ -762,8 +1446,8 @@ export default function ResourceDashboard() {
         )}
 
         <style>{`
-          @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
-          @keyframes spin   { from { transform:rotate(0deg); }             to   { transform:rotate(360deg); }          }
+          @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+          @keyframes spin   { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
         `}</style>
       </div>
     </div>
