@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import distinct
 from typing import Optional
 from datetime import datetime, date
+import logging
 
 from app.dependencies import get_db
 from app.models.resource import ResourceMetric
@@ -14,6 +15,10 @@ from app.schemas.resource import (
     ResourcePeakStats,
 )
 from app.services import resource_service
+from app.services import anomaly_service
+from app.services import ml_anomaly_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/resources",
@@ -284,3 +289,76 @@ def get_all_servers_summary(
         })
 
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANOMALY DETECTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/anomalies/detect",
+    summary="Run anomaly detection on resource metrics",
+    description=(
+        "Detects anomalies using a combination of threshold rules, "
+        "statistical z-score analysis, and (optionally) ML-based Isolation "
+        "Forest.  Handles OVH negative CPU sentinel values gracefully."
+    ),
+    response_model=dict,
+)
+def detect_anomalies(
+    server_name: Optional[str] = Query(None, description="Limit detection to a specific server"),
+    method: str = Query(
+        "all",
+        description="Detection method: 'threshold', 'statistical', 'ml', or 'all'",
+    ),
+    db: Session = Depends(get_db),
+):
+    if method == "threshold":
+        query = db.query(ResourceMetric)
+        if server_name:
+            query = query.filter(ResourceMetric.server_name == server_name)
+        metrics = query.all()
+        anomalies = anomaly_service.detect_threshold_anomalies(metrics)
+        return {
+            "anomalies": anomalies,
+            "total": len(anomalies),
+            "methods_used": ["threshold"],
+        }
+
+    if method == "statistical":
+        anomalies = anomaly_service.detect_statistical_anomalies(db, server_name)
+        return {
+            "anomalies": anomalies,
+            "total": len(anomalies),
+            "methods_used": ["statistical"],
+        }
+
+    if method == "ml":
+        return ml_anomaly_service.detect_ml_anomalies(db, server_name)
+
+    # method == "all" — combine threshold + statistical (+ ML when data-rich)
+    result = anomaly_service.detect_all_anomalies(db, server_name)
+
+    # Also run ML and merge any extra findings
+    ml_result = ml_anomaly_service.detect_ml_anomalies(db, server_name)
+    if ml_result["anomalies"]:
+        all_anomalies = result["anomalies"] + ml_result["anomalies"]
+        result["anomalies"] = anomaly_service._deduplicate(all_anomalies)
+        result["total"] = len(result["anomalies"])
+        result["methods_used"] = sorted(
+            set(result["methods_used"]) | set(ml_result["methods_used"])
+        )
+        # Recount severities
+        result["by_severity"] = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0}
+        for a in result["anomalies"]:
+            sev = a.get("severity", "MEDIUM")
+            result["by_severity"][sev] = result["by_severity"].get(sev, 0) + 1
+
+    if result.get("sentinel_servers", 0) > 0:
+        logger.warning(
+            "⚠️ %d server(s) returned negative CPU (OVH sentinel). "
+            "CPU anomaly detection was skipped for these.",
+            result["sentinel_servers"],
+        )
+
+    return result

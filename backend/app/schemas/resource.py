@@ -4,7 +4,7 @@ from datetime import datetime
 
 
 class ResourceMetricCreate(BaseModel):
-    cpu_usage: float = Field(..., ge=0, le=100, description="CPU usage percentage (0-100)")
+    cpu_usage: float = Field(..., description="CPU usage % (0-100) or negative OVH sentinel (core count)")
     ram_usage: float = Field(..., ge=0, description="RAM usage in GB")
     disk_usage: float = Field(..., ge=0, description="Disk usage in GB")
     server_name: Optional[str] = Field(None, max_length=255, description="Server or host identifier")
@@ -12,8 +12,9 @@ class ResourceMetricCreate(BaseModel):
 
     @validator("cpu_usage")
     def validate_cpu(cls, v):
-        if v < 0 or v > 100:
-            raise ValueError("CPU usage must be between 0 and 100")
+        # Allow negative values (OVH sentinel: negative = hardware core count)
+        if v > 100:
+            raise ValueError("CPU usage must be ≤ 100")
         return round(v, 2)
 
     @validator("ram_usage", "disk_usage")
