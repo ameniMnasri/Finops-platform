@@ -343,7 +343,7 @@ def detect_anomalies(
     ml_result = ml_anomaly_service.detect_ml_anomalies(db, server_name)
     if ml_result["anomalies"]:
         all_anomalies = result["anomalies"] + ml_result["anomalies"]
-        result["anomalies"] = anomaly_service._deduplicate(all_anomalies)
+        result["anomalies"] = anomaly_service.deduplicate_anomalies(all_anomalies)
         result["total"] = len(result["anomalies"])
         result["methods_used"] = sorted(
             set(result["methods_used"]) | set(ml_result["methods_used"])

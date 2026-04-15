@@ -65,14 +65,23 @@ def detect_ml_anomalies(
     methods_used = set()
 
     for srv, metrics in servers.items():
-        # ── Build feature rows, skipping CPU sentinels ──────────────
+        # ── Build feature rows, excluding CPU-sentinel records ──────
         rows = []
         valid_metrics = []
+        sentinel_metrics = []
         for m in metrics:
             valid_cpu, hw_cores = decode_cpu_sentinel(m.cpu_usage)
-            cpu = valid_cpu if valid_cpu is not None else 0.0
-            rows.append([cpu, m.ram_usage or 0.0, m.disk_usage or 0.0])
+            if hw_cores is not None:
+                # Exclude sentinel records from ML — 0.0 would distort model
+                sentinel_metrics.append(m)
+                continue
+            rows.append([valid_cpu or 0.0, m.ram_usage or 0.0, m.disk_usage or 0.0])
             valid_metrics.append(m)
+
+        # Sentinel-only servers fall back to threshold detection (RAM/Disk only)
+        if sentinel_metrics and not valid_metrics:
+            threshold_fallback_metrics.extend(sentinel_metrics)
+            continue
 
         if len(rows) < MIN_SAMPLES_FOR_ML:
             # Fallback to threshold detection for sparse servers

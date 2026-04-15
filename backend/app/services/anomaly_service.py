@@ -27,6 +27,10 @@ RAM_HIGH_RATIO = 0.90            # 90 % of max observed RAM → HIGH
 DISK_HIGH_RATIO = 0.90           # 90 % of max observed Disk → HIGH
 Z_SCORE_THRESHOLD = 2.0          # standard deviations for statistical detection
 MIN_SAMPLES_FOR_ZSCORE = 2       # need at least 2 points for std-dev
+# Z-score of 4σ ≈ 99.99th percentile in a normal distribution.
+# Dividing by this constant maps the z-score to a 0-1 confidence range
+# where a value of 1.0 represents an extreme outlier.
+Z_SCORE_MAX_FOR_NORMALIZATION = 4.0
 
 
 def _severity(score: float) -> str:
@@ -204,24 +208,25 @@ def detect_statistical_anomalies(
             )
             continue
 
-        # Collect valid CPU values (skip sentinels)
-        cpu_vals = []
+        # Collect valid values paired with their source metric objects
+        cpu_pairs = []  # list of (value, metric)
         for m in metrics:
             valid_cpu, _ = decode_cpu_sentinel(m.cpu_usage)
             if valid_cpu is not None:
-                cpu_vals.append(valid_cpu)
+                cpu_pairs.append((valid_cpu, m))
 
-        ram_vals = [m.ram_usage for m in metrics if m.ram_usage is not None]
-        disk_vals = [m.disk_usage for m in metrics if m.disk_usage is not None]
+        ram_pairs = [(m.ram_usage, m) for m in metrics if m.ram_usage is not None]
+        disk_pairs = [(m.disk_usage, m) for m in metrics if m.disk_usage is not None]
 
-        for metric_name, values, unit in [
-            ("cpu_usage", cpu_vals, "%"),
-            ("ram_usage", ram_vals, "GB"),
-            ("disk_usage", disk_vals, "GB"),
+        for metric_name, pairs, unit in [
+            ("cpu_usage", cpu_pairs, "%"),
+            ("ram_usage", ram_pairs, "GB"),
+            ("disk_usage", disk_pairs, "GB"),
         ]:
-            if len(values) < MIN_SAMPLES_FOR_ZSCORE:
+            if len(pairs) < MIN_SAMPLES_FOR_ZSCORE:
                 continue
 
+            values = [v for v, _ in pairs]
             arr = np.array(values, dtype=float)
             mean = np.mean(arr)
             std = np.std(arr, ddof=1)  # sample std-dev
@@ -229,10 +234,10 @@ def detect_statistical_anomalies(
             if std == 0:
                 continue  # all values identical — no anomaly
 
-            for i, val in enumerate(values):
+            for val, src_metric in pairs:
                 z = abs(val - mean) / std
                 if z >= Z_SCORE_THRESHOLD:
-                    score = min(z / 4.0, 1.0)  # normalize to 0-1
+                    score = min(z / Z_SCORE_MAX_FOR_NORMALIZATION, 1.0)
                     anomalies.append({
                         "server_name": srv,
                         "anomaly_type": f"{metric_name}_zscore",
@@ -249,8 +254,8 @@ def detect_statistical_anomalies(
                         "z_score": round(z, 2),
                         "detection_method": "statistical",
                         "recorded_at": (
-                            metrics[i].recorded_at.isoformat()
-                            if metrics[i].recorded_at else None
+                            src_metric.recorded_at.isoformat()
+                            if src_metric.recorded_at else None
                         ),
                     })
 
@@ -298,7 +303,7 @@ def detect_all_anomalies(
 
     # Merge and deduplicate (prefer higher-severity)
     combined = threshold_anomalies + stat_anomalies
-    deduped = _deduplicate(combined)
+    deduped = deduplicate_anomalies(combined)
 
     by_severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0}
     for a in deduped:
@@ -315,7 +320,7 @@ def detect_all_anomalies(
     }
 
 
-def _deduplicate(anomalies: List[Dict]) -> List[Dict]:
+def deduplicate_anomalies(anomalies: List[Dict]) -> List[Dict]:
     """Remove duplicate anomalies for the same server+metric, keeping the
     highest severity."""
     severity_order = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1}
