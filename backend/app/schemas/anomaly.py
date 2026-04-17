@@ -3,7 +3,7 @@ Pydantic schemas for Anomaly — request/response models.
 """
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 from app.models.anomaly import AnomalyType, AnomalySeverity, AnomalyMethod
 
 
@@ -58,6 +58,9 @@ class DetectMLRequest(BaseModel):
                                      description="Expected proportion of outliers (0.01–0.5)")
     n_estimators:      int   = Field(100, ge=10, le=500)
     window_days:       int   = Field(60,  ge=14, le=365)
+    mom_groupby:       Literal["service", "ref"] = Field(
+        "service", description="Aggregation mode for cost anomalies (service or ref)"
+    )
     save:              bool  = Field(True)
 
 

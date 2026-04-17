@@ -80,6 +80,11 @@ def _to_aware_dt(d) -> datetime:
     return _utcnow()
 
 
+def _peer_expected_median(_entity_value: float, all_values: List[float]) -> float:
+    peers = [float(v) for v in all_values if v is not None]
+    return statistics.median(peers) if peers else 0.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DÉTECTION STATISTIQUE DES COÛTS — FinOps
 # ─────────────────────────────────────────────────────────────────────────────
@@ -163,11 +168,6 @@ def detect_cost_anomalies(
         for svc, series in by_service.items()
     }
     all_totals = list(service_totals.values())
-    if len(all_totals) >= 3:
-        inter_service_median = statistics.median(all_totals)
-        inter_service_threshold = inter_service_median * 3.0
-    else:
-        inter_service_threshold = None
 
     detected: List[Anomaly] = []
     seen_keys = set()   # évite les doublons intra-service
@@ -257,9 +257,14 @@ def detect_cost_anomalies(
                     )
 
         # ── Méthode 3 : Outlier inter-services ──────────────────────────────
-        if inter_service_threshold is not None:
+        if len(all_totals) >= 3:
             svc_total = service_totals[service]
-            if svc_total > inter_service_threshold:
+            expected_cost = _peer_expected_median(svc_total, all_totals)
+            is_peer_anomaly = (
+                expected_cost > 0
+                and (svc_total > expected_cost * 3.0 or svc_total < expected_cost / 3.0)
+            )
+            if is_peer_anomaly:
                 last_day, last_cost = series[-1]
                 detected_at         = _to_aware_dt(last_day)
                 key                 = (service, str(last_day)[:10], "inter")
@@ -272,22 +277,22 @@ def detect_cost_anomalies(
                         severity        = AnomalySeverity.HIGH,
                         method          = AnomalyMethod.STATISTICAL,
                         observed_value  = svc_total,
-                        expected_value  = inter_service_median,
+                        expected_value  = expected_cost,
                         std_dev         = 0.0,
                         z_score         = None,
-                        threshold_value = inter_service_threshold,
-                        threshold_type  = "outlier_inter_services_3x_median",
+                        threshold_value = expected_cost * 3.0,
+                        threshold_type  = "outlier_inter_services_3x_or_1over3_median",
                         detected_at     = detected_at,
                         description     = (
-                            f"Service '{service}' : coût total {svc_total:.2f}€ dépasse "
-                            f"3× la médiane inter-services ({inter_service_median:.2f}€). "
-                            f"Ce service est anormalement cher par rapport aux autres."
+                            f"Service '{service}' : coût total {svc_total:.2f}€ "
+                            f"vs médiane pairs {expected_cost:.2f}€ (même niveau service). "
+                            f"Règle peer : >3× ou <1/3 de la médiane."
                         ),
                         unit            = "€",
                     ))
                     logger.warning(
                         f"💸 Outlier inter-services: {service} | "
-                        f"total={svc_total:.2f}€ > 3×médiane={inter_service_threshold:.2f}€"
+                        f"total={svc_total:.2f}€ vs median_pairs={expected_cost:.2f}€"
                     )
 
     if save and detected:

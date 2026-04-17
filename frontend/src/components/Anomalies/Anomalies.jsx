@@ -4,7 +4,7 @@
 //  2. expected_value label correct selon le contexte (pair group vs mois précédent)
 //  3. Explication claire du seuil IF et du coût normal
 //  4. mom_groupby passé à l'API selon le choix du filtre
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   AlertTriangle, AlertCircle, CheckCircle, Brain,
   RefreshCw, DollarSign, BarChart2,
@@ -102,10 +102,17 @@ function anomalySignals(anomaly) {
   const tt  = anomaly.threshold_type ?? '';
   const mom = parseMomFromThreshold(tt) || parseDescMom(anomaly.description);
   const isIF  = anomaly.anomaly_score != null;
-  const isMom = tt.includes('mom_variation') ||
+  const isMom = tt.includes('mom_variation') || tt.includes('mom>') ||
                 mom?.variation != null ||
                 parseDesc(anomaly.description).momVariation != null;
   return { isIF, isMom, mom };
+}
+
+function parseAggregationMode(anomaly) {
+  const tt = anomaly.threshold_type ?? '';
+  if (tt.includes('lvl=ref') || tt.includes('mom_ref')) return 'ref';
+  if (tt.includes('lvl=service') || tt.includes('mom_service')) return 'service';
+  return null;
 }
 
 // ─── Référence OVH ────────────────────────────────────────────────────────────
@@ -218,10 +225,7 @@ function CostInsightPanel({ anomaly }) {
   const prevCost = parsed.previousCost ?? (isMom && !isIF ? expected : null);
 
   // ✅ NOUVEAU: Déterminer le mode MoM utilisé
-  const thresholdType = anomaly.threshold_type || '';
-  const momMode = thresholdType.includes('mom_ref') ? 'ref' : 
-                  thresholdType.includes('mom_service') ? 'service' :
-                  'inconnu';
+  const momMode = parseAggregationMode(anomaly) || 'inconnu';
 
   const nServices = anomaly.threshold_type?.match(/n=(\d+)/)?.[1] ?? '?';
   const ifExplain = isIF
@@ -233,7 +237,7 @@ function CostInsightPanel({ anomaly }) {
 
   // ✅ LABEL CLAIR selon contexte
   const normalLabel = isIF
-    ? `Moyenne inter-services (${nServices} services sur 90j) — VRAI MOYENNE`
+    ? `Médiane des ${momMode === 'ref' ? 'serveurs' : 'services'} (${nServices} entités sur la période)`
     : isMom && !isIF 
     ? `Coût mois précédent (base MoM ${momMode === 'ref' ? 'par ref serveur' : 'par service'})`
     : 'Référence';
@@ -330,10 +334,10 @@ function CostInsightPanel({ anomaly }) {
           <div style={{ marginTop: 8, padding: '8px 12px', background: 'white', borderRadius: 6, border: '1px solid #5eead4' }}>
             <p style={{ fontSize: 11, fontWeight: 700, color: T.teal, margin: '0 0 4px' }}>📊 D'où vient le "coût normal" ({fmtEuro(expected)}) ?</p>
             <p style={{ fontSize: 11, color: '#134E4A', margin: 0, lineHeight: 1.6 }}>
-              C'est la <strong>MOYENNE EXACTE des coûts totaux de {nServices} services</strong> sur 90 jours.
-              Formule : SUM(total par service) / {nServices} = {fmtEuro(expected)} €
+              C'est la <strong>MÉDIANE des coûts des pairs au même niveau d'agrégation</strong> ({momMode === 'ref' ? 'serveur/ref_id' : 'service_name'}).
+              L'ancienne valeur "82.45€" était fausse car calculée en moyenne globale, ce qui mélangeait les niveaux et était sensible aux outliers.
               <br/>
-              ✅ Cette valeur est <strong>vérifiable et transparente</strong> — voir logs du serveur.
+              ✅ Cette valeur est robuste et vérifiable sur les coûts de la période courante.
             </p>
           </div>
         </div>
@@ -561,25 +565,27 @@ export default function Anomalies() {
 
   const mlStep = useDetectionTicker(detectingML);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const [anomRes, sumRes] = await Promise.all([
         api.get('/anomalies/', { params: { limit: 500 } }),
         api.get('/anomalies/summary'),
       ]);
+      const selectedModeTag = momGroupBy === 'ref' ? 'lvl=ref' : 'lvl=service';
       const costOnly = (Array.isArray(anomRes.data) ? anomRes.data : [])
         .filter(a => a.entity_type === 'cost_service' || a.anomaly_type === 'cost_spike');
-      setAnomalies(costOnly);
+      const modeOnly = costOnly.filter(a => (a.threshold_type || '').includes(selectedModeTag));
+      setAnomalies(modeOnly);
       setSummary(sumRes.data);
     } catch {
       toast.error('Erreur chargement anomalies');
     } finally {
       setLoading(false);
     }
-  };
+  }, [momGroupBy]);
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => { loadData(); }, [loadData]);
 
   const runDetection = async () => {
     setDetecting(true);
@@ -825,10 +831,10 @@ export default function Anomalies() {
             <strong>Architecture 3 signaux :</strong>
             <div style={{ marginTop: 6, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
               <span style={{ background: T.tealBg, border: '1px solid #5eead4', borderRadius: 6, padding: '4px 10px', fontSize: 11, color: T.teal, fontWeight: 700 }}>
-                🤖 Signal 1 — Isolation Forest : outlier parmi tous les services (score &lt; -0.08)
+                🤖 Signal 1 — Isolation Forest : outlier parmi les entités du mode (score &lt; -0.08)
               </span>
               <span style={{ background: T.greenBg, border: '1px solid #6ee7b7', borderRadius: 6, padding: '4px 10px', fontSize: 11, color: T.green, fontWeight: 700 }}>
-                📊 Signal 2 — Peer Comparison : % vs moyenne inter-services (expected_value = mean de {anomalies.length > 0 ? `~${anomalies.length}` : 'N'} services)
+                📊 Signal 2 — Peer Comparison : % vs médiane des pairs (même mode: serveur/service)
               </span>
               <span style={{ background: T.orangeBg, border: `1px solid ${T.orange}44`, borderRadius: 6, padding: '4px 10px', fontSize: 11, color: T.orange, fontWeight: 700 }}>
                 📅 Signal 3 — MoM : variation &gt; 50% vs mois précédent → surcoût exact
