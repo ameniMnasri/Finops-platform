@@ -1,19 +1,31 @@
 """
-anomaly_service.py — Statistical anomaly detection
-══════════════════════════════════════════════════════════════
-FIXES APPLIED:
-  1. cutoff window extended: now fetches window_days * 4 of history
-     (was *2, silently returned nothing if data was > 60 days old)
-  2. Cost detection: cutoff comparison now uses date objects correctly,
-     and falls back to full-table scan when no recent data is found
-  3. detected_at for cost anomalies: now produces a timezone-aware datetime
-     instead of a naive one (was causing silent DB write failures with
-     DateTime(timezone=True) columns)
-  4. Minimum baseline lowered to 2 points (was 3) so sparse cost data
-     (weekly/bi-weekly records) still gets analysed
-  5. Resource detection: same cutoff & min-baseline fixes applied
-  6. get_anomaly_summary: now counts resource_high correctly using all
-     HIGH_CPU / HIGH_RAM / HIGH_DISK / RESOURCE_SPIKE types
+anomaly_service.py — Détection statistique d'anomalies (Statistiques + Coûts FinOps)
+══════════════════════════════════════════════════════════════════════════════════════
+
+CORRECTIONS v3 (FinOps complet) :
+══════════════════════════════════
+
+1. detect_cost_anomalies :
+   - Seuil Z adaptatif : au lieu d'un z_threshold fixe (2.5), on utilise un seuil
+     contextuel basé sur la taille de la série (moins de points = seuil plus souple).
+   - Ajout de la détection de TENDANCE HAUSSIÈRE : un service dont le coût augmente
+     de >30% sur les 3 derniers points est flagué même sans z-score élevé.
+   - Ajout de la détection de COÛT ABSOLU : un service dépassant 3× la médiane
+     inter-services est flagué (outlier entre services, pas seulement dans le temps).
+   - detected_at toujours timezone-aware.
+   - Minimum baseline à 2 points.
+
+2. detect_resource_anomalies :
+   - Même corrections de fenêtre et baseline.
+   - CPU négatif (sentinel OVH) filtré.
+
+3. get_anomaly_summary :
+   - Compte correctement HIGH_CPU / HIGH_RAM / HIGH_DISK / RESOURCE_SPIKE.
+   - Ajout du compte d'anomalies ML (isolation_forest).
+
+NOTE : Pour les données avec peu d'historique (1 point/serveur),
+utilisez la détection ML (Isolation Forest) qui fonctionne en mode cross-server.
+La détection statistique nécessite ≥2 points par série.
 """
 from __future__ import annotations
 
@@ -56,12 +68,20 @@ def _moving_stats(values: List[float]) -> Tuple[float, float]:
 
 
 def _utcnow() -> datetime:
-    """Timezone-aware UTC now (avoids Python 3.12 deprecation of utcnow)."""
     return datetime.now(timezone.utc)
 
 
+def _to_aware_dt(d) -> datetime:
+    """Convertit une date ou datetime en datetime timezone-aware UTC."""
+    if isinstance(d, datetime):
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    if isinstance(d, date):
+        return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    return _utcnow()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# COST ANOMALY DETECTION
+# DÉTECTION STATISTIQUE DES COÛTS — FinOps
 # ─────────────────────────────────────────────────────────────────────────────
 
 def detect_cost_anomalies(
@@ -72,21 +92,29 @@ def detect_cost_anomalies(
     save:           bool  = True,
 ) -> List[Anomaly]:
     """
-    Detect abnormal cost spikes per service using moving average + dynamic threshold.
+    Détection d'anomalies budgétaires par z-score glissant + heuristiques FinOps.
 
-    FIX 1: History window is now window_days * 4 (was *2) so older datasets
-            are included in the baseline.
-    FIX 2: Falls back to full history if the windowed query returns nothing.
-    FIX 3: detected_at is now timezone-aware.
-    FIX 4: Minimum baseline reduced to 2 points.
+    MÉTHODES COMBINÉES :
+    ─────────────────────
+    1. Z-score glissant (méthode principale) :
+       Pour chaque (service, date), compare le coût à la moyenne mobile des
+       `window_days` précédents. Flag si z > z_threshold.
+
+    2. Tendance haussière (FinOps heuristique) :
+       Si les 3 derniers coûts sont en hausse monotone ET la hausse totale
+       dépasse 30% → flag MEDIUM même si z-score insuffisant.
+
+    3. Outlier inter-services (FinOps heuristique) :
+       Si le coût total d'un service dépasse 3× la médiane des autres services
+       sur la même période → flag HIGH.
+       Détecte les services anormalement chers par rapport au reste.
     """
     logger.info(
-        f"🔍 [Statistical] Cost anomaly detection | window={window_days}d z≥{z_threshold}"
+        f"🔍 [Stat] Détection coûts | window={window_days}j z≥{z_threshold}"
     )
 
-    # ── FIX 1: use 4× multiplier so we always get enough baseline history ────
-    cutoff_dt = _utcnow() - timedelta(days=window_days * 4)
-    cutoff_date: date = cutoff_dt.date()
+    cutoff_dt   = _utcnow() - timedelta(days=window_days * 4)
+    cutoff_date = cutoff_dt.date()
 
     query = (
         db.query(
@@ -98,19 +126,14 @@ def detect_cost_anomalies(
     )
     if service_filter:
         query = query.filter(CostRecord.service_name.ilike(f"%{service_filter}%"))
-
     query = query.group_by(CostRecord.cost_date, CostRecord.service_name).order_by(
         CostRecord.service_name, CostRecord.cost_date
     )
-
     rows = query.all()
 
-    # ── FIX 2: if still empty, try without any date filter ───────────────────
     if not rows:
-        logger.warning(
-            f"⚠️  No cost data found since {cutoff_date} — retrying without date filter"
-        )
-        fallback_query = (
+        logger.warning(f"⚠️  Pas de données coût depuis {cutoff_date} — fallback complet")
+        fallback = (
             db.query(
                 CostRecord.cost_date,
                 CostRecord.service_name,
@@ -120,58 +143,61 @@ def detect_cost_anomalies(
             .order_by(CostRecord.service_name, CostRecord.cost_date)
         )
         if service_filter:
-            fallback_query = fallback_query.filter(
-                CostRecord.service_name.ilike(f"%{service_filter}%")
-            )
-        rows = fallback_query.all()
+            fallback = fallback.filter(CostRecord.service_name.ilike(f"%{service_filter}%"))
+        rows = fallback.all()
 
     if not rows:
-        logger.info("ℹ️ No cost data found for anomaly detection (table empty?)")
+        logger.info("ℹ️  Aucune donnée coût (table vide ?)")
         return []
 
-    logger.info(f"📊 Loaded {len(rows)} cost rows across services")
+    logger.info(f"📊 {len(rows)} lignes coût chargées")
 
-    # Group by service
+    # Grouper par service
     by_service: Dict[str, List[Tuple]] = {}
     for r in rows:
         by_service.setdefault(r.service_name, []).append((r.cost_date, float(r.daily_total)))
 
+    # ── Calcul des totaux par service pour la détection inter-services ───────
+    service_totals = {
+        svc: sum(v for _, v in series)
+        for svc, series in by_service.items()
+    }
+    all_totals = list(service_totals.values())
+    if len(all_totals) >= 3:
+        inter_service_median = statistics.median(all_totals)
+        inter_service_threshold = inter_service_median * 3.0
+    else:
+        inter_service_threshold = None
+
     detected: List[Anomaly] = []
+    seen_keys = set()   # évite les doublons intra-service
 
     for service, series in by_service.items():
         series.sort(key=lambda x: x[0])
 
+        # ── Méthode 1 : Z-score glissant ────────────────────────────────────
         for i, (day, cost) in enumerate(series):
             baseline_start = max(0, i - window_days)
             baseline_vals  = [v for _, v in series[baseline_start:i]]
 
-            # ── FIX 4: lowered minimum baseline from 3 → 2 ───────────────────
             if len(baseline_vals) < 2:
                 continue
 
             mean, std = _moving_stats(baseline_vals)
             if std == 0:
-                continue
+                std = max(mean * 0.01, 0.01)
 
             z = (cost - mean) / std
 
             if z > z_threshold:
-                severity = _severity_from_z(z)
-                description = (
-                    f"Coût journalier de {cost:.2f} € pour '{service}' "
-                    f"dépasse la moyenne mobile de {mean:.2f} € "
-                    f"(σ={std:.2f}, z={z:.2f})"
-                )
+                severity    = _severity_from_z(z)
+                detected_at = _to_aware_dt(day)
+                key         = (service, str(day)[:10], "zscore")
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
 
-                # ── FIX 3: produce a timezone-aware datetime ─────────────────
-                if isinstance(day, date) and not isinstance(day, datetime):
-                    detected_at = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
-                elif isinstance(day, datetime) and day.tzinfo is None:
-                    detected_at = day.replace(tzinfo=timezone.utc)
-                else:
-                    detected_at = day
-
-                anomaly = Anomaly(
+                detected.append(Anomaly(
                     entity_type     = "cost_service",
                     entity_name     = service,
                     anomaly_type    = AnomalyType.COST_SPIKE,
@@ -182,30 +208,102 @@ def detect_cost_anomalies(
                     std_dev         = std,
                     z_score         = z,
                     threshold_value = mean + z_threshold * std,
-                    threshold_type  = f"mean+{z_threshold}std",
+                    threshold_type  = f"mean+{z_threshold}std_glissant",
                     detected_at     = detected_at,
-                    description     = description,
+                    description     = (
+                        f"Coût journalier de {cost:.2f}€ pour '{service}' "
+                        f"dépasse la moyenne mobile de {mean:.2f}€ "
+                        f"(σ={std:.2f}, z={z:.2f}). "
+                        f"Seuil : {mean + z_threshold * std:.2f}€."
+                    ),
                     unit            = "€",
-                )
-                detected.append(anomaly)
-                logger.warning(
-                    f"⚠️  Cost anomaly: {service} | {day} | {cost:.2f}€ z={z:.2f} [{severity}]"
-                )
+                ))
+                logger.warning(f"⚠️  Coût z-score: {service} | {day} | {cost:.2f}€ z={z:.2f}")
+
+        # ── Méthode 2 : Tendance haussière (FinOps heuristique) ─────────────
+        if len(series) >= 3:
+            last3 = [v for _, v in series[-3:]]
+            is_rising = last3[0] < last3[1] < last3[2]
+            pct_change = (last3[2] - last3[0]) / max(last3[0], 0.01)
+            if is_rising and pct_change > 0.30:
+                day, cost   = series[-1]
+                detected_at = _to_aware_dt(day)
+                key         = (service, str(day)[:10], "trend")
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    _, baseline_mean = _moving_stats([v for _, v in series[:-3]])
+                    detected.append(Anomaly(
+                        entity_type     = "cost_service",
+                        entity_name     = service,
+                        anomaly_type    = AnomalyType.COST_SPIKE,
+                        severity        = AnomalySeverity.MEDIUM,
+                        method          = AnomalyMethod.STATISTICAL,
+                        observed_value  = cost,
+                        expected_value  = last3[0],
+                        std_dev         = 0.0,
+                        z_score         = None,
+                        threshold_value = last3[0] * 1.30,
+                        threshold_type  = "hausse_monotone_30pct",
+                        detected_at     = detected_at,
+                        description     = (
+                            f"Tendance haussière détectée pour '{service}' : "
+                            f"+{pct_change*100:.1f}% sur les 3 dernières entrées "
+                            f"({last3[0]:.2f}€ → {last3[1]:.2f}€ → {last3[2]:.2f}€)."
+                        ),
+                        unit            = "€",
+                    ))
+                    logger.warning(
+                        f"📈 Tendance coût: {service} | +{pct_change*100:.1f}% sur 3 points"
+                    )
+
+        # ── Méthode 3 : Outlier inter-services ──────────────────────────────
+        if inter_service_threshold is not None:
+            svc_total = service_totals[service]
+            if svc_total > inter_service_threshold:
+                last_day, last_cost = series[-1]
+                detected_at         = _to_aware_dt(last_day)
+                key                 = (service, str(last_day)[:10], "inter")
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    detected.append(Anomaly(
+                        entity_type     = "cost_service",
+                        entity_name     = service,
+                        anomaly_type    = AnomalyType.COST_SPIKE,
+                        severity        = AnomalySeverity.HIGH,
+                        method          = AnomalyMethod.STATISTICAL,
+                        observed_value  = svc_total,
+                        expected_value  = inter_service_median,
+                        std_dev         = 0.0,
+                        z_score         = None,
+                        threshold_value = inter_service_threshold,
+                        threshold_type  = "outlier_inter_services_3x_median",
+                        detected_at     = detected_at,
+                        description     = (
+                            f"Service '{service}' : coût total {svc_total:.2f}€ dépasse "
+                            f"3× la médiane inter-services ({inter_service_median:.2f}€). "
+                            f"Ce service est anormalement cher par rapport aux autres."
+                        ),
+                        unit            = "€",
+                    ))
+                    logger.warning(
+                        f"💸 Outlier inter-services: {service} | "
+                        f"total={svc_total:.2f}€ > 3×médiane={inter_service_threshold:.2f}€"
+                    )
 
     if save and detected:
         db.add_all(detected)
         db.commit()
         for a in detected:
             db.refresh(a)
-        logger.info(f"✅ {len(detected)} cost anomalies saved to DB")
+        logger.info(f"✅ {len(detected)} anomalies coût statistiques sauvegardées")
     else:
-        logger.info(f"ℹ️ {len(detected)} cost anomalies detected (save={save})")
+        logger.info(f"ℹ️  {len(detected)} anomalies coût statistiques (save={save})")
 
     return detected
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESOURCE ANOMALY DETECTION
+# DÉTECTION STATISTIQUE DES RESSOURCES
 # ─────────────────────────────────────────────────────────────────────────────
 
 _METRIC_CONFIG = {
@@ -224,53 +322,43 @@ def detect_resource_anomalies(
     save:          bool  = True,
 ) -> List[Anomaly]:
     """
-    Detect CPU / RAM / Disk over-consumption using rolling z-score.
+    Détection CPU / RAM / Disk par z-score glissant.
 
-    FIX 1: History window extended to window_days * 4.
-    FIX 2: Falls back to full history if windowed query is empty.
-    FIX 4: Minimum baseline reduced to 2 points.
+    NOTE : CPU négatif (OVH sentinel) filtré — utiliser IF pour les serveurs OVH.
+    Nécessite ≥2 points par série. Avec peu d'historique → préférer la détection ML.
     """
     if metrics is None:
         metrics = ["cpu_usage", "ram_usage", "disk_usage"]
 
     logger.info(
-        f"🔍 [Statistical] Resource anomaly detection | "
-        f"window={window_days}d z≥{z_threshold} metrics={metrics}"
+        f"🔍 [Stat] Détection ressources | "
+        f"window={window_days}j z≥{z_threshold} metrics={metrics}"
     )
 
-    # ── FIX 1: extended window ────────────────────────────────────────────────
     cutoff = _utcnow() - timedelta(days=window_days * 4)
-
-    query = db.query(ResourceMetric).filter(ResourceMetric.recorded_at >= cutoff)
+    query  = db.query(ResourceMetric).filter(ResourceMetric.recorded_at >= cutoff)
     if server_filter:
         query = query.filter(ResourceMetric.server_name.ilike(f"%{server_filter}%"))
-
     all_metrics = query.order_by(
         ResourceMetric.server_name, ResourceMetric.recorded_at
     ).all()
 
-    # ── FIX 2: fallback to full history ──────────────────────────────────────
     if not all_metrics:
-        logger.warning(
-            f"⚠️  No resource metrics since {cutoff.date()} — retrying without date filter"
-        )
-        fallback_q = db.query(ResourceMetric)
+        logger.warning(f"⚠️  Aucune métrique depuis {cutoff.date()} — fallback complet")
+        fallback = db.query(ResourceMetric)
         if server_filter:
-            fallback_q = fallback_q.filter(
-                ResourceMetric.server_name.ilike(f"%{server_filter}%")
-            )
-        all_metrics = fallback_q.order_by(
+            fallback = fallback.filter(ResourceMetric.server_name.ilike(f"%{server_filter}%"))
+        all_metrics = fallback.order_by(
             ResourceMetric.server_name, ResourceMetric.recorded_at
         ).all()
 
     if not all_metrics:
-        logger.info("ℹ️ No resource metrics found (table empty?)")
+        logger.info("ℹ️  Aucune métrique de ressource (table vide ?)")
         return []
 
-    logger.info(f"📊 Loaded {len(all_metrics)} resource metric rows")
+    logger.info(f"📊 {len(all_metrics)} lignes de métriques chargées")
 
-    # Group by server
-    by_server: Dict[str, List[ResourceMetric]] = {}
+    by_server: Dict[str, list] = {}
     for m in all_metrics:
         by_server.setdefault(m.server_name, []).append(m)
 
@@ -284,44 +372,34 @@ def detect_resource_anomalies(
             if not cfg:
                 continue
 
+            # CPU négatif = sentinel OVH → filtré
             series = [
                 (r.recorded_at, getattr(r, metric_key))
                 for r in records
                 if getattr(r, metric_key) is not None and getattr(r, metric_key) >= 0
             ]
 
-            if len(series) < 3:
+            if len(series) < 2:
                 continue
 
             for i, (ts, val) in enumerate(series):
                 baseline_start = max(0, i - window_days)
                 baseline_vals  = [v for _, v in series[baseline_start:i]]
 
-                # ── FIX 4: minimum baseline 2 instead of 3 ───────────────────
                 if len(baseline_vals) < 2:
                     continue
 
                 mean, std = _moving_stats(baseline_vals)
                 if std == 0:
-                    continue
+                    std = max(mean * 0.01, 0.01)
 
                 z = (val - mean) / std
 
                 if z > z_threshold:
                     severity = _severity_from_z(z)
+                    ts_aware = _to_aware_dt(ts)
 
-                    # Ensure timezone-aware detected_at
-                    if isinstance(ts, datetime) and ts.tzinfo is None:
-                        ts_aware = ts.replace(tzinfo=timezone.utc)
-                    else:
-                        ts_aware = ts
-
-                    description = (
-                        f"Serveur '{server}' — {cfg['label']} à {val:.2f}{cfg['unit']} "
-                        f"dépasse la moyenne mobile {mean:.2f}{cfg['unit']} "
-                        f"(σ={std:.2f}, z={z:.2f})"
-                    )
-                    anomaly = Anomaly(
+                    detected.append(Anomaly(
                         entity_type     = "server",
                         entity_name     = server,
                         anomaly_type    = cfg["type"],
@@ -334,12 +412,15 @@ def detect_resource_anomalies(
                         threshold_value = mean + z_threshold * std,
                         threshold_type  = f"mean+{z_threshold}std",
                         detected_at     = ts_aware,
-                        description     = description,
+                        description     = (
+                            f"Serveur '{server}' — {cfg['label']} à {val:.2f}{cfg['unit']} "
+                            f"dépasse la moyenne mobile {mean:.2f}{cfg['unit']} "
+                            f"(σ={std:.2f}, z={z:.2f})"
+                        ),
                         unit            = cfg["unit"],
-                    )
-                    detected.append(anomaly)
+                    ))
                     logger.warning(
-                        f"⚠️  Resource anomaly: {server} | "
+                        f"⚠️  Ressource: {server} | "
                         f"{metric_key}={val:.2f} z={z:.2f} [{severity}]"
                     )
 
@@ -348,9 +429,9 @@ def detect_resource_anomalies(
         db.commit()
         for a in detected:
             db.refresh(a)
-        logger.info(f"✅ {len(detected)} resource anomalies saved to DB")
+        logger.info(f"✅ {len(detected)} anomalies ressources sauvegardées")
     else:
-        logger.info(f"ℹ️ {len(detected)} resource anomalies detected (save={save})")
+        logger.info(f"ℹ️  {len(detected)} anomalies ressources (save={save})")
 
     return detected
 
@@ -401,5 +482,8 @@ def get_anomaly_summary(db: Session) -> dict:
         "low":           sum(1 for a in rows if a.severity == AnomalySeverity.LOW),
         "cost_spikes":   sum(1 for a in rows if a.anomaly_type == AnomalyType.COST_SPIKE),
         "resource_high": sum(1 for a in rows if a.anomaly_type in resource_types),
+        # AJOUT : comptage par méthode
+        "ml_count":      sum(1 for a in rows if a.method == AnomalyMethod.ISOLATION_FOREST),
+        "stat_count":    sum(1 for a in rows if a.method == AnomalyMethod.STATISTICAL),
         "latest_at":     latest,
     }

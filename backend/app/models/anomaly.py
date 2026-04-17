@@ -38,7 +38,7 @@ class Anomaly(Base):
     # What entity triggered the anomaly
     entity_type     = Column(String(50), nullable=False)     # "server" | "cost_service"
     entity_name     = Column(String(255), nullable=False, index=True)
-
+    
     anomaly_type    = Column(Enum(AnomalyType),     nullable=False, index=True)
     severity        = Column(Enum(AnomalySeverity), nullable=False)
     method          = Column(Enum(AnomalyMethod),   nullable=False)
