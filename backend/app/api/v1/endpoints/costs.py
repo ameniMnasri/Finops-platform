@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from datetime import date
 from typing import List, Optional
+import re
 import logging
 
 from app.database import get_db
@@ -113,7 +114,6 @@ def detect_cost_anomalies(
                 detail="expected_method must be 'median' or 'mean'",
             )
         if target_month is not None:
-            import re
             if not re.match(r"^\d{4}-\d{2}$", target_month):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,

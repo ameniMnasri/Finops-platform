@@ -218,6 +218,8 @@ def detect_cost_anomalies(
         )
 
         mom_anomaly = variation_pct is not None and variation_pct > mom_threshold_pct
+        # Peer anomaly compares each entity against the same-month peer baseline
+        # (median or mean, same aggregation level), so signal is consistent.
         peer_anomaly = current_cost > expected_cost
 
         reasons = []

@@ -51,6 +51,8 @@ const SOURCE_ICONS = {
   OVHcloud:'🔷', AWS:'🟠', Azure:'🔵', GCP:'🔴', Fichier:'📄', Manuel:'✏️',
 };
 
+const HOSTNAME_REGEX = /([a-z0-9-]+\.(?:vps|dedicated|cloud|ovh)\.(?:net|com|eu|fr))/i;
+
 // ══════════════════════════════════════════════════════════════════════
 // DÉTECTION OVH
 // ══════════════════════════════════════════════════════════════════════
@@ -1348,7 +1350,7 @@ export default function Dashboard() {
     const rawServices = [...new Set(filtered.map(c => c.service_name).filter(Boolean))];
 
     const enriched = filtered.map(c => {
-      const hostnameMatch = (c.service_name || '').match(/([a-z0-9-]+\.(?:vps|dedicated|cloud|ovh)\.(?:net|com|eu|fr))/i);
+      const hostnameMatch = (c.service_name || '').match(HOSTNAME_REGEX);
       const exactRef = [c.reference, c.resource_id, c.external_id]
         .map(v => (v || '').toString().trim())
         .find(Boolean)
@@ -1393,7 +1395,7 @@ export default function Dashboard() {
       if (c.reference)   refMapRaw[c._serviceKey].add(c.reference);
       if (c.resource_id) refMapRaw[c._serviceKey].add(c.resource_id);
       if (c.external_id) refMapRaw[c._serviceKey].add(c.external_id);
-      const hostnameMatch = (c.service_name||'').match(/([a-z0-9-]+\.(?:vps|dedicated|cloud|ovh)\.(?:net|com|eu|fr))/i);
+      const hostnameMatch = (c.service_name||'').match(HOSTNAME_REGEX);
       if (hostnameMatch) refMapRaw[c._serviceKey].add(hostnameMatch[1].toLowerCase());
     });
     const itemRefs = {};
