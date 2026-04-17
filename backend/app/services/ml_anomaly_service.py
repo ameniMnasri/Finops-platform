@@ -194,9 +194,8 @@ def aggregate_by_service(
     return series
 
 
-def calculate_expected_cost(entity_value: float, all_peer_values: List[float]) -> float:
+def calculate_expected_cost(_entity_value: float, all_peer_values: List[float]) -> float:
     """Retourne la médiane des coûts du même niveau d'agrégation."""
-    _ = entity_value
     peers = [float(v) for v in all_peer_values if v is not None]
     if not peers:
         return 0.0
@@ -465,15 +464,16 @@ def detect_cost_anomalies_ml(
         last_week_avg = sum(series[-week:]) / week
         trend = _precise_round((last_week_avg - first_week_avg) / max(first_week_avg, 0.01), 6)
 
+        latest_entity_record = latest_by_entity.get(entity)
         row_meta[entity] = {
             "total_cost": total,
             "avg_daily": avg_daily,
             "volatility": volatility,
             "trend": trend,
             "current_cost": current_month_totals.get(entity, 0.0),
-            "last_date": latest_by_entity.get(entity).cost_date if latest_by_entity.get(entity) else today,
-            "service_name": latest_by_entity.get(entity).service_name if latest_by_entity.get(entity) else entity,
-            "reference": latest_by_entity.get(entity).reference if latest_by_entity.get(entity) else (entity if mode == 'ref' else None),
+            "last_date": latest_entity_record.cost_date if latest_entity_record else today,
+            "service_name": latest_entity_record.service_name if latest_entity_record else entity,
+            "reference": latest_entity_record.reference if latest_entity_record else (entity if mode == 'ref' else None),
         }
         feature_entities.append(entity)
         feature_matrix.append([total, avg_daily, volatility, trend])

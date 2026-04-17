@@ -80,8 +80,7 @@ def _to_aware_dt(d) -> datetime:
     return _utcnow()
 
 
-def _peer_expected_median(entity_value: float, all_values: List[float]) -> float:
-    _ = entity_value
+def _peer_expected_median(_entity_value: float, all_values: List[float]) -> float:
     peers = [float(v) for v in all_values if v is not None]
     return statistics.median(peers) if peers else 0.0
 
