@@ -195,7 +195,10 @@ def aggregate_by_service(
 
 
 def calculate_expected_cost(_entity_value: float, all_peer_values: List[float]) -> float:
-    """Retourne la médiane des coûts du même niveau d'agrégation."""
+    """Retourne la médiane des coûts du même niveau d'agrégation.
+
+    `_entity_value` est conservé pour garder une signature explicite côté appelant.
+    """
     peers = [float(v) for v in all_peer_values if v is not None]
     if not peers:
         return 0.0
@@ -459,9 +462,9 @@ def detect_cost_anomalies_ml(
             (statistics.pstdev(series) / max(mean_value, 0.01)) if len(series) >= 2 else 0.0,
             6,
         )
-        week = max(min(7, len(series)), 1)
-        first_week_avg = sum(series[:week]) / week
-        last_week_avg = sum(series[-week:]) / week
+        trend_window = max(min(7, len(series)), 1)
+        first_week_avg = sum(series[:trend_window]) / trend_window
+        last_week_avg = sum(series[-trend_window:]) / trend_window
         trend = _precise_round((last_week_avg - first_week_avg) / max(first_week_avg, 0.01), 6)
 
         latest_entity_record = latest_by_entity.get(entity)
