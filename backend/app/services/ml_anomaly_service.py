@@ -2,23 +2,20 @@
 ml_anomaly_service.py — Détection ML FinOps v6 — CORRECTED
 ═══════════════════════════════════════════════════════════════════════════════
 
-CORRECTIONS FINALES v6.1:
+CORRECTIONS FINALES v7:
 
-1. ✅ expected_value = VRAI moyenne inter-services
-   - Ancien : valeur fantôme, mal calculée
-   - Nouveau : SUM(total par service) / COUNT(services distincts)
-   - Transparent : log affiche chaque service + son total
-   - Vérifiable : somme manuelle = vérif data
+1. ✅ expected_value = MÉDIANE des pairs au même niveau d'agrégation
+   - Ancien bug: moyenne globale (ex "82.45€") mélangeant les niveaux
+   - Nouveau: médiane robuste sur service_name OU reference selon le mode
 
-2. ✅ MoM par-ref vs par-service — VRAIE différenciation
-   - Par-ref : GROUP BY reference (ex: ns31546254.ip-141-94-196.eu)
-   - Par-service : GROUP BY service_name (ex: "RISE-3")
-   - Résultat : deux ensembles distincts, pas de duplication
+2. ✅ Pipeline strict par niveau (service vs ref_id/reference)
+   - Par-ref : GROUP BY (reference, cost_date)
+   - Par-service : GROUP BY (service_name, cost_date)
+   - Résultat : jeux de données distincts, sans duplication
 
-3. ✅ Précision 0.01€ respectée partout
-   - Arrondi au moment du calcul (pas de float approximations)
-   - Validation : chaque valeur affichée passe par Decimal pour sûreté
-   - Logs détaillés : montrent le calcul exact
+3. ✅ MoM et features IF cohérents avec le mode choisi
+   - MoM calculé uniquement dans le même niveau
+   - IF sur features numériques : total, avg_daily, volatility, trend
 """
 
 from __future__ import annotations
@@ -28,9 +25,10 @@ from datetime import datetime, timedelta, timezone, date
 from calendar import monthrange
 from typing import List, Optional, Dict, Tuple
 from decimal import Decimal, ROUND_HALF_UP
+import statistics
 
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func
 
 from app.models.anomaly import Anomaly, AnomalyType, AnomalySeverity, AnomalyMethod
 from app.models.cost import CostRecord
@@ -140,6 +138,71 @@ def _get_month_bounds() -> Tuple[date, date, date, date]:
     return cur_start, cur_end, prev_start, prev_end
 
 
+def aggregate_by_ref_id(
+    db: Session,
+    period: Tuple[date, date],
+) -> Dict[str, List[Tuple[date, float]]]:
+    """Agrège strictement par référence serveur (ref_id / reference) et date."""
+    start_date, end_date = period
+    rows = (
+        db.query(
+            CostRecord.reference,
+            CostRecord.cost_date,
+            func.sum(CostRecord.amount).label("total"),
+        )
+        .filter(
+            CostRecord.cost_date >= start_date,
+            CostRecord.cost_date <= end_date,
+            CostRecord.reference.isnot(None),
+            CostRecord.reference != "",
+        )
+        .group_by(CostRecord.reference, CostRecord.cost_date)
+        .order_by(CostRecord.reference, CostRecord.cost_date)
+        .all()
+    )
+    series: Dict[str, List[Tuple[date, float]]] = {}
+    for ref, cost_day, total in rows:
+        key = str(ref).strip()
+        series.setdefault(key, []).append((cost_day, _precise_round(float(total or 0.0), 2)))
+    return series
+
+
+def aggregate_by_service(
+    db: Session,
+    period: Tuple[date, date],
+) -> Dict[str, List[Tuple[date, float]]]:
+    """Agrège strictement par service_name et date."""
+    start_date, end_date = period
+    rows = (
+        db.query(
+            CostRecord.service_name,
+            CostRecord.cost_date,
+            func.sum(CostRecord.amount).label("total"),
+        )
+        .filter(
+            CostRecord.cost_date >= start_date,
+            CostRecord.cost_date <= end_date,
+        )
+        .group_by(CostRecord.service_name, CostRecord.cost_date)
+        .order_by(CostRecord.service_name, CostRecord.cost_date)
+        .all()
+    )
+    series: Dict[str, List[Tuple[date, float]]] = {}
+    for service_name, cost_day, total in rows:
+        key = str(service_name).strip()
+        series.setdefault(key, []).append((cost_day, _precise_round(float(total or 0.0), 2)))
+    return series
+
+
+def calculate_expected_cost(entity_value: float, all_peer_values: List[float]) -> float:
+    """Retourne la médiane des coûts du même niveau d'agrégation."""
+    _ = entity_value
+    peers = [float(v) for v in all_peer_values if v is not None]
+    if not peers:
+        return 0.0
+    return _precise_round(float(statistics.median(peers)), 2)
+
+
 def compute_mom_per_service(db: Session, verbose: bool = True) -> Dict[str, dict]:
     """
     MoM groupé par SERVICE_NAME — vue agrégée (ex: toutes les lignes "RISE-3").
@@ -159,32 +222,16 @@ def compute_mom_per_service(db: Session, verbose: bool = True) -> Dict[str, dict
     """
     cur_start, cur_end, prev_start, prev_end = _get_month_bounds()
 
-    # Mois courant
-    current_rows = db.query(
-        CostRecord.service_name,
-        func.sum(CostRecord.amount).label("total")
-    ).filter(
-        and_(
-            CostRecord.cost_date >= cur_start,
-            CostRecord.cost_date <= cur_end
-        )
-    ).group_by(CostRecord.service_name).all()
-
-    # Mois précédent
-    previous_rows = db.query(
-        CostRecord.service_name,
-        func.sum(CostRecord.amount).label("total")
-    ).filter(
-        and_(
-            CostRecord.cost_date >= prev_start,
-            CostRecord.cost_date <= prev_end
-        )
-    ).group_by(CostRecord.service_name).all()
-
-    current_map = {str(r[0]): _precise_round(float(r[1] or 0), 2) 
-                   for r in current_rows}
-    previous_map = {str(r[0]): _precise_round(float(r[1] or 0), 2) 
-                    for r in previous_rows}
+    current_series = aggregate_by_service(db, (cur_start, cur_end))
+    previous_series = aggregate_by_service(db, (prev_start, prev_end))
+    current_map = {
+        key: _precise_round(sum(v for _, v in values), 2)
+        for key, values in current_series.items()
+    }
+    previous_map = {
+        key: _precise_round(sum(v for _, v in values), 2)
+        for key, values in previous_series.items()
+    }
     all_keys = set(current_map) | set(previous_map)
 
     result: Dict[str, dict] = {}
@@ -250,36 +297,16 @@ def compute_mom_per_ref(db: Session, verbose: bool = True) -> Dict[str, dict]:
     """
     cur_start, cur_end, prev_start, prev_end = _get_month_bounds()
 
-    # Mois courant — groupé par référence
-    current_rows = db.query(
-        CostRecord.reference,
-        func.sum(CostRecord.amount).label("total")
-    ).filter(
-        and_(
-            CostRecord.cost_date >= cur_start,
-            CostRecord.cost_date <= cur_end,
-            CostRecord.reference.isnot(None),
-            CostRecord.reference != ""
-        )
-    ).group_by(CostRecord.reference).all()
-
-    # Mois précédent — groupé par référence
-    previous_rows = db.query(
-        CostRecord.reference,
-        func.sum(CostRecord.amount).label("total")
-    ).filter(
-        and_(
-            CostRecord.cost_date >= prev_start,
-            CostRecord.cost_date <= prev_end,
-            CostRecord.reference.isnot(None),
-            CostRecord.reference != ""
-        )
-    ).group_by(CostRecord.reference).all()
-
-    current_map = {str(r[0]).strip(): _precise_round(float(r[1] or 0), 2) 
-                   for r in current_rows}
-    previous_map = {str(r[0]).strip(): _precise_round(float(r[1] or 0), 2) 
-                    for r in previous_rows}
+    current_series = aggregate_by_ref_id(db, (cur_start, cur_end))
+    previous_series = aggregate_by_ref_id(db, (prev_start, prev_end))
+    current_map = {
+        key: _precise_round(sum(v for _, v in values), 2)
+        for key, values in current_series.items()
+    }
+    previous_map = {
+        key: _precise_round(sum(v for _, v in values), 2)
+        for key, values in previous_series.items()
+    }
     all_keys = set(current_map) | set(previous_map)
 
     result: Dict[str, dict] = {}
@@ -335,437 +362,223 @@ def detect_cost_anomalies_ml(
     save: bool = True,
     mom_groupby: str = 'service',  # 'service' ou 'ref'
 ) -> List[Anomaly]:
-    """
-    Détecte anomalies coût avec 3 signaux.
-    
-    SIGNAL 1 — Isolation Forest (cross-service)
-      Détecte les services avec profil budgétaire atypique.
-      Seuil : pred==-1 ET score < -0.08
-    
-    SIGNAL 2 — Peer Comparison (% vs moyenne inter-services)
-      expected_value = VRAI moyenne des coûts totaux de tous les services
-      ✅ NOUVELLE LOGIQUE : calculée comme SUM(total par service) / COUNT(services)
-      ✅ TRANSPARENT : chaque service et son total est loggé
-      ✅ VÉRIFIABLE : vous pouvez sommer manuellement et vérifier
-    
-    SIGNAL 3 — Month-over-Month
-      mom_groupby='service' → MoM par service_name
-      mom_groupby='ref'     → MoM par référence OVH exacte
-      ✅ VRAIE DIFFÉRENCIATION : deux calculs distincts, pas de duplication
-    
-    Paramètre mom_groupby :
-      'service' → groupe par service_name global
-      'ref'     → groupe par référence OVH exacte
-    """
-    import statistics as _s
+    """Détection coûts avec séparation stricte des niveaux (service/ref)."""
+    mode = 'ref' if mom_groupby == 'ref' else 'service'
+    today = datetime.now(timezone.utc).date()
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=window_days)).date()
+    cur_start, cur_end, _, _ = _get_month_bounds()
 
     IsolationForest, RobustScaler, np = _load_sklearn()
 
     logger.info(
         f"\n{'='*90}"
-        f"\n💰 [Détection Coûts ML v6.1] Lancement"
-        f"\n  Paramètres: n_estimators={n_estimators}, seuil_IF={IF_SCORE_THRESHOLD_COST}, "
-        f"fenêtre={window_days}j, MoM_mode={mom_groupby}"
+        f"\n💰 [Détection Coûts ML] mode={mode} fenêtre={window_days}j"
+        f"\n   Rappel: expected_cost = médiane des pairs (pas moyenne, pas 82.45€ fantôme)"
         f"\n{'='*90}"
     )
 
-    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=window_days)).date()
-    logger.info(f"📆 Fenêtre d'analyse : depuis {cutoff_date}")
+    aggregate_fn = aggregate_by_ref_id if mode == 'ref' else aggregate_by_service
+    mom_fn = compute_mom_per_ref if mode == 'ref' else compute_mom_per_service
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # ✅ CALCUL MoM SELON LE MODE CHOISI
-    # ─────────────────────────────────────────────────────────────────────────
-    logger.info(f"\n→ Calcul MoM ({mom_groupby})...")
-    if mom_groupby == 'ref':
-        mom_data = compute_mom_per_ref(db, verbose=True)
-    else:
-        mom_data = compute_mom_per_service(db, verbose=True)
+    if mode == 'ref':
+        total_window_rows = db.query(func.count(CostRecord.id)).filter(
+            CostRecord.cost_date >= cutoff_date,
+            CostRecord.cost_date <= today,
+        ).scalar() or 0
+        ref_window_rows = db.query(func.count(CostRecord.id)).filter(
+            CostRecord.cost_date >= cutoff_date,
+            CostRecord.cost_date <= today,
+            CostRecord.reference.isnot(None),
+            CostRecord.reference != "",
+        ).scalar() or 0
+        if total_window_rows > 0 and ref_window_rows < total_window_rows:
+            missing_pct = _precise_round(
+                (1.0 - (float(ref_window_rows) / float(total_window_rows))) * 100.0,
+                2,
+            )
+            logger.info(
+                f"📎 Data quality ref_id/reference: {ref_window_rows}/{total_window_rows} lignes exploitables "
+                f"(~{missing_pct}% sans ref_id/reference)."
+            )
 
-    logger.info(f"  ✓ {len(mom_data)} entrées MoM trouvées")
+    series_by_entity = aggregate_fn(db, (cutoff_date, today))
+    current_month_series = aggregate_fn(db, (cur_start, cur_end))
+    mom_data = mom_fn(db, verbose=True)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # AGRÉGAT CROSS-SERVICE POUR IF
-    # ─────────────────────────────────────────────────────────────────────────
-    logger.info(f"\n→ Agrégation cross-service pour Isolation Forest...")
-
-    base_q = db.query(
-        CostRecord.service_name,
-        CostRecord.reference,
-        func.sum(CostRecord.amount).label("total"),
-        func.avg(CostRecord.amount).label("avg"),
-        func.max(CostRecord.amount).label("max_amt"),
-        func.min(CostRecord.cost_date).label("first_date"),
-        func.max(CostRecord.cost_date).label("last_date"),
-        func.count(CostRecord.id).label("n_entries"),
-    ).filter(CostRecord.cost_date >= cutoff_date).group_by(
-        CostRecord.service_name,
-        CostRecord.reference
-    )
-
-    if service_filter:
-        base_q = base_q.filter(CostRecord.service_name.ilike(f"%{service_filter}%"))
-
-    rows = base_q.all()
-
-    if not rows:
-        logger.warning(f"⚠️  Aucune donnée depuis {cutoff_date} — fallback complet")
-        fallback = db.query(
-            CostRecord.service_name,
-            CostRecord.reference,
-            func.sum(CostRecord.amount).label("total"),
-            func.avg(CostRecord.amount).label("avg"),
-            func.max(CostRecord.amount).label("max_amt"),
-            func.min(CostRecord.cost_date).label("first_date"),
-            func.max(CostRecord.cost_date).label("last_date"),
-            func.count(CostRecord.id).label("n_entries"),
-        ).group_by(CostRecord.service_name, CostRecord.reference)
-        if service_filter:
-            fallback = fallback.filter(CostRecord.service_name.ilike(f"%{service_filter}%"))
-        rows = fallback.all()
-
-    if len(rows) < MIN_SERVICES_FOR_CROSS:
-        logger.warning(f"⚠️  Seulement {len(rows)} services (min {MIN_SERVICES_FOR_CROSS})")
+    entities = sorted(set(series_by_entity) | set(current_month_series) | set(mom_data))
+    if not entities:
+        logger.info("ℹ️ Aucune donnée coût à analyser")
         return []
 
-    logger.info(f"  ✓ {len(rows)} services trouvés")
+    current_month_totals = {
+        entity: _precise_round(sum(v for _, v in values), 2)
+        for entity, values in current_month_series.items()
+    }
+    all_current_values = [current_month_totals.get(e, 0.0) for e in entities]
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # ✅ CALCUL DE expected_value = VRAI MOYENNE
-    # ─────────────────────────────────────────────────────────────────────────
-    logger.info(f"\n→ Calcul de la moyenne inter-services (expected_value)...")
-    
-    service_totals: Dict[str, float] = {}
-    for row in rows:
-        svc = row.service_name
-        total = _precise_round(float(row.total or 0), 2)
-        service_totals[svc] = total
-
-    # ✅ expected_value = MOYENNE SIMPLE DE TOUS LES TOTAUX
-    # C'est la vrai norme de la flotte, pas une valeur fantôme
-    total_sum = sum(service_totals.values())
-    n_services = len(service_totals)
-    expected_value = _precise_round(total_sum / n_services, 2) if n_services > 0 else 0.0
-
-    logger.info(
-        f"  📊 Détail des services ({n_services} total):"
-    )
-    for svc, total in sorted(service_totals.items()):
-        logger.info(f"    • {svc:40s} → {total:10.2f}€")
-
-    logger.info(
-        f"\n  ✅ SUM(tous les totaux) = {total_sum:10.2f}€"
-        f"\n  ✅ COUNT(services) = {n_services}"
-        f"\n  ✅ EXPECTED_VALUE (moyenne) = {total_sum:.2f}€ / {n_services} = "
-        f"{expected_value:.2f}€"
-    )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Préparation matrice features
-    # ─────────────────────────────────────────────────────────────────────────
-
-    service_names: List[str] = []
-    references: List[Optional[str]] = []
-    feature_matrix: List[List[float]] = []
     row_meta: Dict[str, dict] = {}
-    latest_cost_by_svc: Dict[str, CostRecord] = {}
+    feature_entities: List[str] = []
+    feature_matrix: List[List[float]] = []
+    latest_by_entity: Dict[str, CostRecord] = {}
 
-    # Latest CostRecord par service
-    latest_dates = db.query(
-        CostRecord.service_name,
-        func.max(CostRecord.cost_date).label("max_date"),
-    ).filter(CostRecord.cost_date >= cutoff_date).group_by(
-        CostRecord.service_name
-    ).subquery()
-
-    latest_records = db.query(CostRecord).join(
-        latest_dates,
-        and_(
-            CostRecord.service_name == latest_dates.c.service_name,
-            CostRecord.cost_date == latest_dates.c.max_date,
-        ),
-    ).all()
-
-    for rec in latest_records:
-        if rec.service_name not in latest_cost_by_svc:
-            latest_cost_by_svc[rec.service_name] = rec
-
-    # Séries temporelles
-    series_by_svc: Dict[str, List[float]] = {}
-    for r in db.query(
-        CostRecord.service_name,
-        CostRecord.amount,
-        CostRecord.cost_date,
-    ).filter(CostRecord.cost_date >= cutoff_date).order_by(
-        CostRecord.service_name,
-        CostRecord.cost_date,
-    ).all():
-        series_by_svc.setdefault(r.service_name, []).append(
-            _precise_round(float(r.amount), 2)
+    latest_rows = (
+        db.query(CostRecord)
+        .filter(CostRecord.cost_date >= cutoff_date)
+        .order_by(CostRecord.cost_date.desc())
+        .all()
+    )
+    for rec in latest_rows:
+        key = (
+            (str(rec.reference).strip() if rec.reference else None)
+            if mode == 'ref'
+            else str(rec.service_name).strip()
         )
+        if not key:
+            continue
+        if service_filter and (service_filter.lower() not in str(rec.service_name or "").lower()):
+            continue
+        if key not in latest_by_entity:
+            latest_by_entity[key] = rec
 
-    # Construction matrix
-    for row in rows:
-        svc = row.service_name
-        ref = getattr(row, 'reference', None)
-        total = _precise_round(float(row.total or 0), 2)
-        n = int(row.n_entries or 1)
+    for entity in entities:
+        if service_filter and mode == 'service' and (service_filter.lower() not in entity.lower()):
+            continue
+        if service_filter and mode == 'ref':
+            latest_rec = latest_by_entity.get(entity)
+            if latest_rec is None or service_filter.lower() not in str(latest_rec.service_name or "").lower():
+                continue
 
-        series = series_by_svc.get(svc, [total])
+        series = [v for _, v in series_by_entity.get(entity, [])]
+        if not series:
+            series = [current_month_totals.get(entity, 0.0)]
 
-        if len(series) >= 2:
-            std_s = _s.pstdev(series)
-            mean_s = _s.mean(series)
-            volatility = std_s / max(mean_s, 0.01)
-            q1_end = max(int(len(series) * 0.25), 1)
-            q4_start = int(len(series) * 0.75)
-            first_avg = sum(series[:q1_end]) / q1_end
-            last_seg = series[q4_start:] or [series[-1]]
-            last_avg = sum(last_seg) / len(last_seg)
-            trend = (last_avg - first_avg) / max(first_avg, 0.01)
-        else:
-            volatility = 0.0
-            trend = 0.0
+        total = _precise_round(sum(series), 2)
+        days = max((today - cutoff_date).days + 1, 1)
+        avg_daily = _precise_round(total / days, 6)
+        mean_value = statistics.mean(series) if series else 0.0
+        volatility = _precise_round(
+            (statistics.pstdev(series) / max(mean_value, 0.01)) if len(series) >= 2 else 0.0,
+            6,
+        )
+        week = max(min(7, len(series)), 1)
+        first_week_avg = sum(series[:week]) / week
+        last_week_avg = sum(series[-week:]) / week
+        trend = _precise_round((last_week_avg - first_week_avg) / max(first_week_avg, 0.01), 6)
 
-        span_days = max(
-            (row.last_date - row.first_date).days, 1
-        ) if row.first_date and row.last_date else 1
-        avg_daily = total / span_days
-
-        service_names.append(svc)
-        references.append(ref)
-        feature_matrix.append([total, avg_daily, volatility, trend])
-        row_meta[svc] = {
-            "total": total,
+        row_meta[entity] = {
+            "total_cost": total,
             "avg_daily": avg_daily,
             "volatility": volatility,
             "trend": trend,
-            "n_entries": n,
-            "last_date": row.last_date,
-            "reference": ref,
+            "current_cost": current_month_totals.get(entity, 0.0),
+            "last_date": latest_by_entity.get(entity).cost_date if latest_by_entity.get(entity) else today,
+            "service_name": latest_by_entity.get(entity).service_name if latest_by_entity.get(entity) else entity,
+            "reference": latest_by_entity.get(entity).reference if latest_by_entity.get(entity) else (entity if mode == 'ref' else None),
         }
+        feature_entities.append(entity)
+        feature_matrix.append([total, avg_daily, volatility, trend])
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Isolation Forest
-    # ─────────────────────────────────────────────────────────────────────────
-    logger.info(f"\n→ Entraînement Isolation Forest...")
-
-    FEAT_NAMES = ["total_amount", "avg_daily", "volatility", "trend"]
-    X_raw = np.array(feature_matrix, dtype=np.float64)
-
-    active_cols = np.where(X_raw.std(axis=0) > 1e-8)[0]
-    if len(active_cols) < 1:
-        logger.warning("⚠️  Pas assez de variance")
+    if not feature_entities:
         return []
 
-    X_active = X_raw[:, active_cols]
-    active_names = [FEAT_NAMES[i] for i in active_cols]
-
-    scaler = RobustScaler()
-    X_scaled = scaler.fit_transform(X_active)
-
-    clf = IsolationForest(
-        n_estimators=n_estimators,
-        contamination="auto",
-        random_state=42,
-        bootstrap=True,
-    )
-    preds = clf.fit_predict(X_scaled)
-    scores = clf.score_samples(X_scaled)
-
-    logger.info(f"  ✓ Features utilisées : {active_names}")
-    logger.info(f"  ✓ {len(preds)} services évalués")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # DÉTECTION : SIGNAL 1 + 2 (IF outliers)
-    # ─────────────────────────────────────────────────────────────────────────
-    logger.info(f"\n→ Détection des outliers Isolation Forest...")
+    if_outliers: Dict[str, float] = {}
+    if len(feature_entities) >= MIN_SERVICES_FOR_CROSS:
+        X_raw = np.array(feature_matrix, dtype=np.float64)
+        active_cols = np.where(X_raw.std(axis=0) > 1e-8)[0]
+        if len(active_cols) > 0:
+            X_active = X_raw[:, active_cols]
+            scaler = RobustScaler()
+            X_scaled = scaler.fit_transform(X_active)
+            clf = IsolationForest(
+                n_estimators=n_estimators,
+                contamination="auto",
+                random_state=42,
+                bootstrap=True,
+            )
+            preds = clf.fit_predict(X_scaled)
+            scores = clf.score_samples(X_scaled)
+            for entity, pred, score in zip(feature_entities, preds, scores):
+                if pred == -1 and score < IF_SCORE_THRESHOLD_COST:
+                    if_outliers[entity] = _precise_round(float(score), 4)
 
     detected: List[Anomaly] = []
-    seen_services: set = set()
+    for entity in feature_entities:
+        meta = row_meta[entity]
+        current_cost = _precise_round(float(meta["current_cost"]), 2)
+        expected_cost = calculate_expected_cost(current_cost, all_current_values)
+        mom = mom_data.get(entity, {})
+        variation_pct = _precise_round(float(mom.get("variation_pct", 0.0)), 2)
+        mom_anomaly = variation_pct > MOM_VARIATION_THRESHOLD
+        peer_anomaly = (
+            expected_cost > 0
+            and (current_cost > (3.0 * expected_cost) or current_cost < (expected_cost / 3.0))
+        )
+        if_anomaly = entity in if_outliers
 
-    for i, (svc, ref, pred, score) in enumerate(
-        zip(service_names, references, preds, scores)
-    ):
-        # Double-gate
-        if pred != -1 or score >= IF_SCORE_THRESHOLD_COST:
+        if not (if_anomaly or mom_anomaly or peer_anomaly):
             continue
 
-        meta = row_meta[svc]
-        latest_rec = latest_cost_by_svc.get(svc)
-        record_id = latest_rec.id if latest_rec else None
+        threshold_flags: List[str] = [f"lvl={mode}"]
+        if if_anomaly:
+            threshold_flags.append(f"if<{IF_SCORE_THRESHOLD_COST}")
+        if mom_anomaly:
+            threshold_flags.append(f"mom>{MOM_VARIATION_THRESHOLD:.0f}")
+        if peer_anomaly:
+            threshold_flags.append("peer3x")
 
-        # % déviation par rapport à la moyenne
-        pct_deviation = _precise_round(
-            ((meta["total"] - expected_value) / max(expected_value, 0.01)) * 100.0,
-            2
+        anomaly_score = if_outliers.get(entity)
+        severity = (
+            _severity_from_score(anomaly_score)
+            if anomaly_score is not None
+            else _severity_from_mom(variation_pct if variation_pct > 0 else MOM_VARIATION_THRESHOLD)
         )
+        if peer_anomaly and anomaly_score is None and not mom_anomaly:
+            severity = AnomalySeverity.HIGH
 
-        # Description détaillée
+        previous_cost = _precise_round(float(mom.get("previous_cost", 0.0)), 2)
+        diff_cost = _precise_round(float(mom.get("diff", 0.0)), 2)
+        peer_dev = _precise_round(
+            ((current_cost - expected_cost) / expected_cost * 100.0) if expected_cost > 0 else 0.0,
+            2,
+        )
         description = (
-            f"[Anomalie Budgétaire IF] Service '{svc}' (ref={ref}) | "
-            f"Coût: {meta['total']:.2f}€ | "
-            f"Moyenne inter-services: {expected_value:.2f}€ ({n_services} services) | "
-            f"Déviation: {pct_deviation:+.2f}% | "
-            f"Score IF: {score:.4f} (seuil: {IF_SCORE_THRESHOLD_COST}) | "
-            f"Volatilité: {meta['volatility']:.4f} | "
-            f"Tendance: {meta['trend']:+.4f}"
+            f"[Anomalie coût {mode}] entity={entity} ref={meta.get('reference')} | "
+            f"Mois courant: {current_cost:.2f}€ | "
+            f"Médiane pairs ({mode}): {expected_cost:.2f}€ | "
+            f"Écart pairs: {peer_dev:+.2f}% | "
+            f"Mois précédent: {previous_cost:.2f}€ | "
+            f"MoM: {variation_pct:+.2f}% ({diff_cost:+.2f}€)"
         )
+        if anomaly_score is not None:
+            description += f" | IF score: {anomaly_score:.4f} (seuil {IF_SCORE_THRESHOLD_COST})"
 
-        # MoM lookup
-        mom_key = ref if (mom_groupby == 'ref' and ref) else svc
-        mom = mom_data.get(mom_key, {})
-
-        if mom and mom.get("has_previous"):
-            var_pct = mom.get("variation_pct", 0.0)
-            diff_mom = mom.get("diff", 0.0)
-            sign = "+" if diff_mom >= 0 else ""
-            description += (
-                f" | MoM: {sign}{var_pct:.2f}% ({sign}{diff_mom:.2f}€)"
+        detected.append(
+            Anomaly(
+                entity_type="cost_service",
+                entity_name=_trunc(str(entity), _MAX_ENTITY_NAME),
+                anomaly_type=AnomalyType.COST_SPIKE,
+                severity=severity,
+                method=AnomalyMethod.ISOLATION_FOREST,
+                observed_value=current_cost,
+                expected_value=expected_cost,
+                std_dev=_precise_round(abs(diff_cost), 2),
+                z_score=None,
+                anomaly_score=anomaly_score,
+                threshold_value=None,
+                threshold_type=_trunc("|".join(threshold_flags), _MAX_THRESHOLD_TYP),
+                detected_at=_to_aware(meta.get("last_date")),
+                description=description,
+                unit="€",
+                source_record_id=latest_by_entity.get(entity).id if latest_by_entity.get(entity) else None,
             )
-            # Escalade sévérité si MoM fort
-            base_sev = _severity_from_score(score)
-            if var_pct >= MOM_VARIATION_THRESHOLD:
-                final_sev = AnomalySeverity.CRITICAL
-            elif var_pct >= MOM_COMBINED_THRESHOLD and base_sev != AnomalySeverity.LOW:
-                final_sev = AnomalySeverity.HIGH
-            else:
-                final_sev = base_sev
-        else:
-            final_sev = _severity_from_score(score)
-
-        detected.append(Anomaly(
-            entity_type="cost_service",
-            entity_name=_trunc(svc, _MAX_ENTITY_NAME),
-            anomaly_type=AnomalyType.COST_SPIKE,
-            severity=final_sev,
-            method=AnomalyMethod.ISOLATION_FOREST,
-            observed_value=meta["total"],
-            expected_value=expected_value,  # ✅ VRAI MOYENNE
-            std_dev=_precise_round(float(X_raw[:, 0].std()), 2),
-            z_score=None,
-            anomaly_score=_precise_round(float(score), 4),
-            threshold_value=None,
-            threshold_type=_trunc(
-                f"if_score<{IF_SCORE_THRESHOLD_COST}_n={n_services}",
-                _MAX_THRESHOLD_TYP,
-            ),
-            detected_at=_to_aware(meta.get("last_date")),
-            description=description,
-            unit="€",
-            source_record_id=record_id,
-        ))
-
-        seen_services.add(svc)
-        logger.warning(
-            f"  🚨 [IF OUTLIER] {svc} | "
-            f"total={meta['total']:.2f}€ vs expected={expected_value:.2f}€ "
-            f"({pct_deviation:+.2f}%) | score={score:.4f} | [{final_sev}]"
         )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # DÉTECTION : SIGNAL 3 PUR (MoM > 50% sans IF)
-    # ─────────────────────────────────────────────────────────────────────────
-    logger.info(f"\n→ Détection MoM pure (> {MOM_VARIATION_THRESHOLD}%)...")
-
-    for mom_key, mom in mom_data.items():
-        if mom_key in seen_services:
-            continue
-
-        var_pct = mom.get("variation_pct", 0.0)
-        diff_mom = mom.get("diff", 0.0)
-
-        if var_pct < MOM_VARIATION_THRESHOLD or diff_mom <= 0:
-            continue
-
-        # Trouver le service/ref correspondant
-        meta = row_meta.get(mom_key)
-        if meta is None:
-            # Fallback : chercher dans latest_cost_by_svc
-            if mom_groupby == 'service':
-                latest_rec = latest_cost_by_svc.get(mom_key)
-            else:
-                latest_rec = next(
-                    (r for r in latest_cost_by_svc.values()
-                     if getattr(r, 'reference', None) == mom_key),
-                    None
-                )
-            
-            if latest_rec is None:
-                continue
-
-            meta = {
-                "total": mom.get("current_cost", 0.0),
-                "avg_daily": mom.get("current_cost", 0.0) / 30.0,
-                "volatility": 0.0,
-                "trend": 0.0,
-                "last_date": None,
-                "reference": getattr(latest_rec, 'reference', None),
-            }
-            svc_name = latest_rec.service_name
-            record_id = latest_rec.id
-        else:
-            svc_name = mom_key if mom_groupby == 'service' else mom_key
-            record_id = None
-
-        sign = "+" if diff_mom >= 0 else ""
-        severity = _severity_from_mom(var_pct)
-
-        description = (
-            f"[Anomalie MoM] Service '{svc_name}' (mode={mom_groupby}) | "
-            f"Hausse: {sign}{var_pct:.2f}% ({sign}{diff_mom:.2f}€) | "
-            f"Mois précédent: {mom.get('previous_cost', 0.0):.2f}€ → "
-            f"Courant: {mom.get('current_cost', 0.0):.2f}€"
-        )
-
-        detected.append(Anomaly(
-            entity_type="cost_service",
-            entity_name=_trunc(svc_name, _MAX_ENTITY_NAME),
-            anomaly_type=AnomalyType.COST_SPIKE,
-            severity=severity,
-            method=AnomalyMethod.ISOLATION_FOREST,
-            observed_value=mom.get("current_cost", 0.0),
-            expected_value=mom.get("previous_cost", 0.0),  # ← Mois précédent
-            std_dev=_precise_round(abs(diff_mom), 2),
-            z_score=None,
-            anomaly_score=None,
-            threshold_value=MOM_VARIATION_THRESHOLD,
-            threshold_type=_trunc(
-                f"mom_{mom_groupby}>{MOM_VARIATION_THRESHOLD:.0f}%",
-                _MAX_THRESHOLD_TYP,
-            ),
-            detected_at=_to_aware(meta.get("last_date")),
-            description=description,
-            unit="€",
-            source_record_id=record_id,
-        ))
-
-        seen_services.add(mom_key)
-        logger.warning(
-            f"  📅 [MoM {mom_groupby}] {svc_name} | "
-            f"{sign}{var_pct:.2f}% | {sign}{diff_mom:.2f}€ | [{severity}]"
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SAUVEGARDE
-    # ─────────────────────────────────────────────────────────────────────────
     if save and detected:
         db.add_all(detected)
         db.commit()
-        for a in detected:
-            db.refresh(a)
-        logger.info(
-            f"\n✅ {len(detected)} anomalies ML SAUVEGARDÉES"
-            f"\n   • IF outliers: {sum(1 for a in detected if a.anomaly_score is not None)}"
-            f"\n   • MoM pures: {sum(1 for a in detected if a.anomaly_score is None)}"
-            f"\n   • Mode MoM: {mom_groupby}"
-            f"\n{'='*90}\n"
-        )
-    else:
-        logger.info(
-            f"\nℹ️  {len(detected)} anomalies ML (save={save}, mode={mom_groupby})"
-            f"\n{'='*90}\n"
-        )
-
+        for anomaly in detected:
+            db.refresh(anomaly)
+    logger.info(f"✅ {len(detected)} anomalies coût détectées (mode={mode})")
     return detected
 
 
