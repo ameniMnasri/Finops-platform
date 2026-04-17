@@ -20,6 +20,7 @@ from app.schemas.cost import (
 )
 
 from app.services.cost_service import cost_service
+from app.services import ml_anomaly_service
 from app.dependencies import get_current_user
 from app.schemas.user import User
 
@@ -86,6 +87,56 @@ def get_total_cost(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to get total: {str(e)}"
+        )
+
+
+@router.get("/anomalies/detect", response_model=dict)
+def detect_cost_anomalies(
+    group_by: str = Query("ref_id", description="Aggregation mode: 'ref_id' or 'service_name'"),
+    target_month: Optional[str] = Query(None, description="Target month in YYYY-MM"),
+    expected_method: str = Query("median", description="Expected cost baseline: 'median' or 'mean'"),
+    contamination: float = Query(0.08, ge=0.001, le=0.49),
+    mom_threshold_pct: float = Query(50.0, ge=0.0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Detect cost anomalies with strict separation by ref_id or service_name."""
+    try:
+        if group_by not in {"ref_id", "service_name"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="group_by must be 'ref_id' or 'service_name'",
+            )
+        if expected_method not in {"median", "mean"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="expected_method must be 'median' or 'mean'",
+            )
+        if target_month is not None:
+            import re
+            if not re.match(r"^\d{4}-\d{2}$", target_month):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="target_month must use YYYY-MM format",
+                )
+
+        return ml_anomaly_service.detect_cost_anomalies(
+            db=db,
+            group_by=group_by,
+            target_month=target_month,
+            expected_method=expected_method,
+            contamination=contamination,
+            mom_threshold_pct=mom_threshold_pct,
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error("❌ Cost anomaly detection error: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to detect cost anomalies: {str(e)}",
         )
 
 # ==================== CREATE ====================

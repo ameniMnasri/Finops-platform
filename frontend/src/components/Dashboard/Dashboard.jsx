@@ -74,19 +74,6 @@ function detectOvhCategory(name) {
 const isServer  = cat => cat === 'VPS' || cat === 'Dedicated';
 const isService = cat => !isServer(cat);
 
-function extractRef(name) {
-  if (!name) return '?';
-  let s = name
-    .replace(/\([^)]*\)/g, '')
-    .replace(/Sans engagement/gi, '')
-    .replace(/Date de fin d['']engagement\s*:?\s*\d{2}\/\d{2}\/\d{4}/gi, '')
-    .replace(/Monthly fees/gi, '')
-    .replace(/only applicable for \d+ times?/gi, '')
-    .replace(/au prorata\s*:\s*\d+ jours/gi, '')
-    .replace(/\s+/g, ' ').trim();
-  return s.length > 36 ? s.slice(0, 35) + '…' : s;
-}
-
 // ══════════════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════════════
@@ -1199,8 +1186,6 @@ function ServiceFilter({
                                             <div style={{ fontSize: 12, fontWeight: 800, color: isSel ? c : '#0f172a' }}>{fmt2(total)} €</div>
                                             <div style={{ fontSize: 9, color: '#94a3b8', marginTop: 1 }}>HT</div>
                                         </div>
-                                        // find the header row with these columns and add:
-<span style={{ fontSize:9,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',textAlign:'center' }}>Date</span>
                                         {/* Share % */}
                                         <div style={{ textAlign: 'right', paddingTop: 2 }}>
                                             <span style={{ fontSize: 10, fontWeight: 700, color: pct >= 10 ? c : '#64748b', background: pct >= 10 ? c + '12' : '#f8fafc', padding: '2px 5px', borderRadius: 99, border: `1px solid ${pct >= 10 ? c + '33' : '#e2e8f0'}`, display: 'inline-block' }}>
@@ -1362,22 +1347,38 @@ export default function Dashboard() {
     const maxEntry = filtered.find(c => Number(c.amount||0) === maxCost);
     const rawServices = [...new Set(filtered.map(c => c.service_name).filter(Boolean))];
 
-    const enriched = filtered.map(c => ({
-      ...c, _cat: detectOvhCategory(c.service_name), _ref: extractRef(c.service_name),
-    }));
+    const enriched = filtered.map(c => {
+      const hostnameMatch = (c.service_name || '').match(/([a-z0-9-]+\.(?:vps|dedicated|cloud|ovh)\.(?:net|com|eu|fr))/i);
+      const exactRef = [c.reference, c.resource_id, c.external_id]
+        .map(v => (v || '').toString().trim())
+        .find(Boolean)
+        || (hostnameMatch ? hostnameMatch[1].toLowerCase() : null);
+      const serviceKey = (c.service_name || '').trim() || '?';
+      return {
+        ...c,
+        _cat: detectOvhCategory(c.service_name),
+        _serviceKey: serviceKey,
+        _refId: exactRef,
+        _serverKey: exactRef || `UNREFERENCED::${serviceKey}`,
+      };
+    });
 
     const serverLines  = enriched.filter(c => isServer(c._cat));
     const serviceLines = enriched.filter(c => isService(c._cat));
 
-    const buildTotals = lines => {
+    const buildTotals = (lines, keyField) => {
       const map = {};
-      lines.forEach(c => { map[c._ref] = (map[c._ref]||0) + Number(c.amount||0); });
+      lines.forEach(c => {
+        const key = c[keyField];
+        if (!key) return;
+        map[key] = (map[key] || 0) + Number(c.amount || 0);
+      });
       return map;
     };
 
-    const serverTotals  = buildTotals(serverLines);
-    const serviceTotals = buildTotals(serviceLines);
-    const allTotals     = buildTotals(enriched);
+    const serverTotals  = buildTotals(serverLines, '_serverKey');
+    const serviceTotals = buildTotals(serviceLines, '_serviceKey');
+    const allTotals     = buildTotals(enriched, '_serviceKey');
 
     const topN = (map, n=10) =>
       Object.entries(map).sort((a,b) => b[1]-a[1]).slice(0,n).map(([k]) => k);
@@ -1385,15 +1386,15 @@ export default function Dashboard() {
     const top10Servers   = topN(serverTotals, 10);
     const top10Services  = topN(serviceTotals, 10);
 
-    // ── itemRefs: { _ref → search string of hostnames }
+    // ── itemRefs: { service_name → search string of refs/hostnames }
     const refMapRaw = {};
     enriched.forEach(c => {
-      if (!refMapRaw[c._ref]) refMapRaw[c._ref] = new Set();
-      if (c.reference)   refMapRaw[c._ref].add(c.reference);
-      if (c.resource_id) refMapRaw[c._ref].add(c.resource_id);
-      if (c.external_id) refMapRaw[c._ref].add(c.external_id);
+      if (!refMapRaw[c._serviceKey]) refMapRaw[c._serviceKey] = new Set();
+      if (c.reference)   refMapRaw[c._serviceKey].add(c.reference);
+      if (c.resource_id) refMapRaw[c._serviceKey].add(c.resource_id);
+      if (c.external_id) refMapRaw[c._serviceKey].add(c.external_id);
       const hostnameMatch = (c.service_name||'').match(/([a-z0-9-]+\.(?:vps|dedicated|cloud|ovh)\.(?:net|com|eu|fr))/i);
-      if (hostnameMatch) refMapRaw[c._ref].add(hostnameMatch[1].toLowerCase());
+      if (hostnameMatch) refMapRaw[c._serviceKey].add(hostnameMatch[1].toLowerCase());
     });
     const itemRefs = {};
     Object.entries(refMapRaw).forEach(([name, set]) => {
@@ -1401,36 +1402,27 @@ export default function Dashboard() {
       if (refs.length) itemRefs[name] = refs.join(' ');
     });
 
-    // ── refCostMap: { _ref → [ { ref, amount } ] } — EACH reference ID with its total cost
-    // This groups by (service _ref + individual reference id) so every row in the detail
-    // panel shows exactly which OVH reference contributed how much.
-    // ── refCostMap: { _ref → [ { ref, amount } ] }
-// Each cost line gets its OWN row — no summing across lines for the same ref
-const refCostRaw = {};
-enriched.forEach(c => {
-  if (!refCostRaw[c._ref]) refCostRaw[c._ref] = [];
+    // ── refCostMap: { service_name → [ { ref, amount } ] }
+    const refCostRaw = {};
+    enriched.forEach(c => {
+      if (!refCostRaw[c._serviceKey]) refCostRaw[c._serviceKey] = [];
+      const primaryId = c._refId || shortName(c.service_name, 30);
+      const amount = Number(c.amount || 0);
+      if (amount > 0) {
+        refCostRaw[c._serviceKey].push({
+          ref: primaryId,
+          amount,
+          date: c.cost_date || null,
+        });
+      }
+    });
 
-  const ids = [c.reference, c.resource_id, c.external_id].filter(Boolean);
-  const hostnameMatch = (c.service_name||'').match(/([a-z0-9-]+\.(?:vps|dedicated|cloud|ovh)\.(?:net|com|eu|fr))/i);
-  if (hostnameMatch) ids.push(hostnameMatch[1].toLowerCase());
-
-  const primaryId = ids[0] || shortName(c.service_name, 30);
-  const amount = Number(c.amount || 0);
-  if (amount > 0) {
-refCostRaw[c._ref].push({ 
-  ref: primaryId, 
-  amount,
-  date: c.cost_date || null,   // ← add date
-});  }
-});
-
-// Sort each service's refs by amount descending
-const refCostMap = {};
-Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
-  refCostMap[serviceName] = refs.sort((a, b) => b.amount - a.amount);
-});
+    const refCostMap = {};
+    Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
+      refCostMap[serviceName] = refs.sort((a, b) => b.amount - a.amount);
+    });
     // Build month map (with all months pre-filled at 0)
-    const buildMonthMap = (lines, topKeys) => {
+    const buildMonthMap = (lines, topKeys, keyField) => {
       const monthsInLines = {};
       lines.forEach(c => {
         const d = parseDate(c.cost_date); if (!d) return;
@@ -1446,7 +1438,8 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
       lines.forEach(c => {
         const d = parseDate(c.cost_date); if (!d) return;
         const key = getMonthKey(d);
-        if (map[key] && c._ref in map[key]) { map[key][c._ref] += Number(c.amount||0); }
+        const entityKey = c[keyField];
+        if (map[key] && entityKey in map[key]) { map[key][entityKey] += Number(c.amount||0); }
       });
       return Object.values(map).sort((a,b) => a.month.localeCompare(b.month));
     };
@@ -1461,8 +1454,8 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
     const byMonth   = Object.values(mMap).sort((a,b) => a.month.localeCompare(b.month));
     const allMonths = byMonth.map(m => ({ key:m.month, label:m.label }));
 
-    const byServerMonth  = buildMonthMap(serverLines,  top10Servers);
-    const byServiceMonth = buildMonthMap(serviceLines, top10Services);
+    const byServerMonth  = buildMonthMap(serverLines,  top10Servers, '_serverKey');
+    const byServiceMonth = buildMonthMap(serviceLines, top10Services, '_serviceKey');
 
     // Heatmap
     const top12All = topN(allTotals, 12);
@@ -1471,7 +1464,7 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
     enriched.forEach(c => {
       const d = parseDate(c.cost_date); if (!d) return;
       const key = getMonthKey(d);
-      if (c._ref in heatData) { heatData[c._ref][key] = (heatData[c._ref][key]||0) + Number(c.amount||0); }
+      if (c._serviceKey in heatData) { heatData[c._serviceKey][key] = (heatData[c._serviceKey][key]||0) + Number(c.amount||0); }
     });
     const heatMax = Math.max(...top12All.flatMap(svc => Object.values(heatData[svc]||{})), 1);
 
