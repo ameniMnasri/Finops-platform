@@ -1,7 +1,7 @@
 // ResourceDashboard.jsx — Enhanced FinOps Dashboard with Rightsizing + Dates
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
-  Server, Search, RefreshCw, BarChart2, Zap, Activity,
+  Server, Search, RefreshCw, Zap, Activity,
   ChevronUp, ChevronDown, Cpu, HardDrive, MemoryStick,
   AlertTriangle, AlertCircle, CheckCircle, DollarSign,
   TrendingDown, TrendingUp, Layers, Eye, Target, Calendar,
@@ -182,6 +182,11 @@ function buildServerList(summaries) {
       const type = apiType === 'DEDICATED' ? 'Dedicated'
                  : apiType === 'VPS'       ? 'VPS'
                  : detectServerCategory(s.server_name);
+      // OVH lifecycle dates — already stored in DB during /import-ovh-metrics
+      // summary API returns them directly: no separate OVH API call needed
+      const creationDate   = s.creation_date   ? new Date(s.creation_date)   : null;
+      const expirationDate = s.expiration_date ? new Date(s.expiration_date) : null;
+
       return {
         id:             `srv-${s.server_name.replace(/\s+/g, '-')}`,
         name:           s.server_name,
@@ -195,11 +200,14 @@ function buildServerList(summaries) {
         invoiceDiskGb:  s.invoice_disk_gb  ?? null,
         cpuCores:       s.cpu_cores        ?? null,
         cpuSource:      s.cpu_source       || 'none',
+        ovhState:       s.ovh_state        ?? null,
+        ovhOffer:       s.ovh_offer        ?? null,
         status:         calculateStatus(avgCpu, peakCpu),
-        // dates will be enriched later
-        creationDate:   null,
-        renewalDate:    null,
-        expirationDate: null,
+        // ── OVH real dates (from /serviceInfos, persisted during OVH import) ──
+        creationDate,
+        renewalDate:      expirationDate,   // OVH "expiration" = renewal deadline
+        expirationDate,
+        // invoice dates enriched later in enrichServersWithCosts
         firstInvoiceDate: null,
         lastInvoiceDate:  null,
       };
@@ -280,8 +288,9 @@ function enrichServersWithCosts(servers, costMap) {
       monthlyCost:      costData?.monthlyAmount    ?? null,
       totalCost:        costData?.totalAmount      ?? null,
       costMonth:        costData?.latestMonth      ?? null,
-      creationDate:     costData?.creationDate     ?? null,
-      renewalDate:      costData?.renewalDate      ?? null,
+      // Only use invoice dates as fallback — never overwrite real OVH dates
+      creationDate:     srv.creationDate     || costData?.creationDate     || null,
+      renewalDate:      srv.renewalDate      || costData?.renewalDate      || null,
       firstInvoiceDate: costData?.firstInvoiceDate ?? null,
       lastInvoiceDate:  costData?.lastInvoiceDate  ?? null,
     };
@@ -472,11 +481,12 @@ function NoDataBadge() {
 
 // ─── DateCell — shows creation + renewal dates ─────────────────────────────
 function DateCell({ server }) {
-  const { creationDate, renewalDate, expirationDate, firstInvoiceDate, lastInvoiceDate } = server;
+  const { creationDate, renewalDate, expirationDate, firstInvoiceDate, lastInvoiceDate, ovhState } = server;
 
-  // Effective dates: prefer OVH API data, fallback to cost invoice dates
+  // Priority: OVH API real date > invoice-derived date
   const effectiveCreation = creationDate || firstInvoiceDate;
   const effectiveRenewal  = renewalDate  || expirationDate;
+  const isOvhDate         = !!creationDate;   // true = from OVH /serviceInfos, not an invoice estimate
 
   const daysLeft = daysUntil(effectiveRenewal);
   const renewalColor = daysLeft !== null
@@ -496,8 +506,10 @@ function DateCell({ server }) {
           <Calendar size={10} color="#94a3b8" />
           <span style={{ fontSize: 10, color: '#94a3b8' }}>Créé</span>
           <span style={{ fontSize: 11, fontWeight: 700, color: T.slate }}>{fmtDateShort(effectiveCreation)}</span>
-          {firstInvoiceDate && !creationDate && (
-            <span style={{ fontSize: 9, color: '#cbd5e1' }} title="Date déduite de la première facture">≈</span>
+          {isOvhDate ? (
+            <span style={{ fontSize: 9, color: '#0073d1', fontWeight: 700, background: '#e0f2fe', padding: '1px 4px', borderRadius: 3 }} title="Date exacte OVH API">OVH</span>
+          ) : (
+            <span style={{ fontSize: 9, color: '#cbd5e1' }} title="Date déduite de la première facture">≈facture</span>
           )}
         </div>
       )}
@@ -512,6 +524,9 @@ function DateCell({ server }) {
             </span>
           )}
         </div>
+      )}
+      {ovhState && ovhState !== 'ok' && (
+        <span style={{ fontSize: 9, color: T.amber, fontWeight: 700 }}>⚠ {ovhState}</span>
       )}
     </div>
   );
@@ -1082,11 +1097,7 @@ function Insights({ servers }) {
           <div style={{ fontSize: 28, fontWeight: 900, color: T.amber }}>{fmtEuro(wastefulCost)} <span style={{ fontSize: 14, fontWeight: 600 }}>€</span></div>
           <div style={{ fontSize: 12, color: T.amber, marginTop: 4 }}>{wasteful.length} serveurs · {totalCost > 0 ? ((wastefulCost / totalCost) * 100).toFixed(1) : 0}% du budget</div>
         </div>
-        <div style={{ background: 'white', borderRadius: 16, border: `1px solid #6ee7b7`, padding: '18px 22px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
-          <div style={{ fontSize: 10, fontWeight: 800, color: T.green, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>✅ Économies potentielles</div>
-          <div style={{ fontSize: 28, fontWeight: 900, color: T.green }}>{fmtEuro(wastefulCost * 0.4)} <span style={{ fontSize: 14, fontWeight: 600 }}>€</span></div>
-          <div style={{ fontSize: 12, color: T.green, marginTop: 4 }}>Estimation ~40% via rightsizing</div>
-        </div>
+        
         <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, padding: '18px 22px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
           <div style={{ fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>📊 Coût moyen / serveur</div>
           <div style={{ fontSize: 28, fontWeight: 900, color: T.slate }}>{withCost.length > 0 ? fmtEuro(totalCost / withCost.length) : '—'} <span style={{ fontSize: 14, fontWeight: 600, color: T.muted }}>€</span></div>
@@ -1183,35 +1194,71 @@ function Insights({ servers }) {
 
 // ─── Main ResourceDashboard Component ─────────────────────────────────────
 export default function ResourceDashboard() {
-  const [servers,       setServers]       = useState([]);
-  const [loading,       setLoading]       = useState(true);
-  const [error,         setError]         = useState(null);
-  const [search,        setSearch]        = useState('');
-  const [typeFilter,    setTypeFilter]    = useState('all');
-  const [activeTab,     setActiveTab]     = useState('servers');
-  const [selectedServer,setSelectedServer]= useState(null);
-  const [timeSeriesData,setTimeSeriesData]= useState([]);
-  const [chartsLoading, setChartsLoading] = useState(false);
+  const [servers,          setServers]          = useState([]);
+  const [loading,          setLoading]          = useState(true);
+  const [error,            setError]            = useState(null);
+  const [search,           setSearch]           = useState('');
+  const [typeFilter,       setTypeFilter]       = useState('all');
+  const [serverNameFilter, setServerNameFilter] = useState(''); // dropdown filter
+  const [activeTab,        setActiveTab]        = useState('servers');
+  const [datesLoading,     setDatesLoading]     = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      // Fetch all data in parallel including OVH info
-      const [summaries, costs, ovhInfoList] = await Promise.all([
+      // Fetch summaries + costs in parallel
+      // Dates (creationDate, expirationDate) are embedded in the summary response —
+      // they were stored in DB during the last /import-ovh-metrics call.
+      const [summaries, costs] = await Promise.all([
         resourcesService.getAllServersSummary(),
         costsService.getAllCosts().catch(() => []),
-        ovhService.getAllServersInfo().catch(() => []), // graceful fallback
       ]);
 
-      const rawServers   = buildServerList(summaries);
-      const costMap      = buildCostMap(costs);
-      const withCosts    = enrichServersWithCosts(rawServers, costMap);
-      // Enrich with OVH dates (creation, expiration, offer)
-      const enriched     = enrichServersWithOvhInfo(withCosts, ovhInfoList);
+      const rawServers = buildServerList(summaries);   // OVH dates already parsed here
+      const costMap    = buildCostMap(costs);
+      const withCosts  = enrichServersWithCosts(rawServers, costMap);
+
+      // Try batch OVH info for any servers that still have no dates
+      // (e.g. imported before the new columns existed)
+      const missingDates = withCosts.filter(s => !s.creationDate && !s.renewalDate);
+      let enriched = withCosts;
+
+      if (missingDates.length > 0) {
+        const ovhInfoList = await ovhService.getAllServersInfo().catch(() => []);
+        enriched = enrichServersWithOvhInfo(withCosts, ovhInfoList);
+      }
 
       setServers(enriched);
-      if (!selectedServer && enriched.length > 0) setSelectedServer(enriched[0]);
+
+      // Progressive per-server fallback only for servers still without dates
+      const stillMissing = enriched.filter(s => !s.creationDate && !s.renewalDate);
+      if (stillMissing.length > 0) {
+        setDatesLoading(true);
+        const BATCH = 5;
+        let updated = [...enriched];
+        for (let i = 0; i < stillMissing.length; i += BATCH) {
+          const chunk = stillMissing.slice(i, i + BATCH);
+          const results = await Promise.all(
+            chunk.map(srv => ovhService.getServerInfo(srv.name).catch(() => null))
+          );
+          results.forEach((info, idx) => {
+            if (!info) return;
+            const globalIdx = updated.findIndex(s => s.name === chunk[idx].name);
+            if (globalIdx === -1) return;
+            updated[globalIdx] = {
+              ...updated[globalIdx],
+              creationDate:   info.creationDate   || info.creation_date   || updated[globalIdx].creationDate   || null,
+              renewalDate:    info.expiration      || info.renewalDate     || info.renewal_date              || updated[globalIdx].renewalDate    || null,
+              expirationDate: info.expiration      || info.expirationDate  || updated[globalIdx].expirationDate || null,
+              ovhState:       info.state           || updated[globalIdx].ovhState  || null,
+              ovhOffer:       info.offer           || info.currentRange    || updated[globalIdx].ovhOffer       || null,
+            };
+          });
+          setServers([...updated]);
+        }
+        setDatesLoading(false);
+      }
     } catch (e) {
       setError(e?.response?.data?.detail || e.message || 'Erreur lors du chargement');
     } finally {
@@ -1221,35 +1268,26 @@ export default function ResourceDashboard() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  useEffect(() => {
-    if (!selectedServer || activeTab !== 'charts') return;
-    let cancelled = false;
-    (async () => {
-      setChartsLoading(true);
-      setTimeSeriesData([]);
-      try {
-        const data = await resourcesService.getServerTimeSeries(selectedServer.name, 7);
-        if (!cancelled) setTimeSeriesData(data);
-      } catch { if (!cancelled) setTimeSeriesData([]); }
-      finally   { if (!cancelled) setChartsLoading(false); }
-    })();
-    return () => { cancelled = true; };
-  }, [selectedServer, activeTab]);
-
-  const handleServerSelect = useCallback(srv => {
-    setSelectedServer(srv);
-    setActiveTab('charts');
+  // When dropdown selects a server, set search to its name so the table filters to it
+  const handleDropdownSelect = useCallback((name) => {
+    setServerNameFilter(name);
+    setSearch(''); // clear text search when using dropdown
   }, []);
+
+  const handleServerSelect = useCallback(() => {}, []); // kept for ServerTable compat
 
   const filteredServers = useMemo(() => {
     let list = servers;
     if (typeFilter !== 'all') list = list.filter(s => s.type === typeFilter);
-    if (search.trim()) {
+    // Dropdown filter (exact server) takes priority over text search
+    if (serverNameFilter) {
+      list = list.filter(s => s.name === serverNameFilter);
+    } else if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(s => s.name.toLowerCase().includes(q));
     }
     return list;
-  }, [servers, typeFilter, search]);
+  }, [servers, typeFilter, search, serverNameFilter]);
 
   const summary = useMemo(() => generateSummary(filteredServers), [filteredServers]);
 
@@ -1267,9 +1305,8 @@ export default function ResourceDashboard() {
   );
 
   const tabs = [
-    { id: 'servers',     label: 'Serveurs',        icon: Server,    count: null },
-    { id: 'charts',      label: 'Métriques',        icon: BarChart2, count: null },
-    { id: 'insights',    label: 'Insights FinOps',  icon: Zap,       count: renewalSoonCount },
+    { id: 'servers',  label: 'Serveurs',       icon: Server, count: null },
+    { id: 'insights', label: 'Insights FinOps', icon: Zap,    count: renewalSoonCount },
   ];
 
   return (
@@ -1348,18 +1385,20 @@ export default function ResourceDashboard() {
         {activeTab === 'servers' && (
           <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, boxShadow: '0 4px 20px rgba(0,0,0,0.06)', overflow: 'hidden', animation: 'fadeIn .3s ease' }}>
             <div style={{ padding: '18px 20px', borderBottom: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', background: '#FAFBFC' }}>
-              <div style={{ position: 'relative', flex: 1, maxWidth: 400, minWidth: 200 }}>
+              {/* Text search */}
+              <div style={{ position: 'relative', flex: 1, maxWidth: 300, minWidth: 160 }}>
                 <Search size={15} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#94A3B8' }} />
                 <input
                   type="text"
                   placeholder="Rechercher un serveur..."
                   value={search}
-                  onChange={e => setSearch(e.target.value)}
+                  onChange={e => { setSearch(e.target.value); setServerNameFilter(''); }}
                   style={{ width: '100%', padding: '10px 12px 10px 38px', borderRadius: 10, border: `1.5px solid ${T.border}`, fontSize: 13, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box', transition: 'border-color .15s', background: 'white' }}
                   onFocus={e => (e.target.style.borderColor = T.green)}
                   onBlur={e  => (e.target.style.borderColor = T.border)}
                 />
               </div>
+              {/* Type filter buttons */}
               <div style={{ display: 'flex', gap: 6 }}>
                 {[{ id: 'all', label: 'Tous' }, { id: 'VPS', label: '🖥️ VPS' }, { id: 'Dedicated', label: '🗄️ Dédiés' }].map(btn => (
                   <button key={btn.id} onClick={() => setTypeFilter(btn.id)} style={{ padding: '8px 16px', borderRadius: 99, fontWeight: 700, fontSize: 12, background: typeFilter === btn.id ? T.green : 'white', color: typeFilter === btn.id ? 'white' : T.muted, border: typeFilter === btn.id ? `1.5px solid ${T.green}` : `1.5px solid ${T.border}`, cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s' }}>
@@ -1367,74 +1406,37 @@ export default function ResourceDashboard() {
                   </button>
                 ))}
               </div>
+              {/* Server dropdown selector */}
+              <select
+                value={serverNameFilter}
+                onChange={e => handleDropdownSelect(e.target.value)}
+                style={{ padding: '9px 14px', borderRadius: 8, border: `1.5px solid ${serverNameFilter ? T.green : T.border}`, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', background: 'white', color: serverNameFilter ? T.green : T.slate, maxWidth: 320, minWidth: 200, fontWeight: serverNameFilter ? 700 : 400 }}
+              >
+                <option value="">— Tous les serveurs —</option>
+                {servers.map(s => (
+                  <option key={s.name} value={s.name}>{s.name} ({s.type})</option>
+                ))}
+              </select>
+              {/* Clear button when a server is selected in dropdown */}
+              {serverNameFilter && (
+                <button
+                  onClick={() => setServerNameFilter('')}
+                  style={{ padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, background: T.redBg, color: T.red, border: `1.5px solid #fca5a5`, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                >
+                  ✕ Effacer
+                </button>
+              )}
+              {/* Date loading indicator */}
+              {datesLoading && (
+                <span style={{ fontSize: 11, color: T.muted, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} /> Chargement des dates OVH...
+                </span>
+              )}
               <div style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 700, color: T.muted, background: T.bg, padding: '6px 12px', borderRadius: 8, border: `1px solid ${T.border}` }}>
                 {filteredServers.length} serveur{filteredServers.length !== 1 ? 's' : ''}
               </div>
             </div>
             <ServerTable servers={filteredServers} loading={loading} onServerSelect={handleServerSelect} />
-          </div>
-        )}
-
-        {/* CHARTS TAB */}
-        {activeTab === 'charts' && (
-          <div style={{ animation: 'fadeIn .3s ease' }}>
-            {selectedServer ? (
-              <>
-                <div style={{ background: 'white', borderRadius: 14, padding: '18px 22px', marginBottom: 18, border: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16, boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
-                  <div>
-                    <h2 style={{ fontSize: 17, fontWeight: 800, color: T.slate, marginBottom: 5 }}>{selectedServer.name}</h2>
-                    <p style={{ fontSize: 12, color: '#94a3b8' }}>
-                      {selectedServer.hasRealData
-                        ? `RAM moy: ${selectedServer.avgRam.toFixed(1)} GB · Disk moy: ${selectedServer.avgDisk.toFixed(1)} GB`
-                        : 'Aucune métrique disponible'}
-                      {selectedServer.monthlyCost !== null && (
-                        <span style={{ marginLeft: 12, color: T.green, fontWeight: 700 }}>
-                          💰 {fmtEuro(selectedServer.monthlyCost)} €/mois
-                        </span>
-                      )}
-                      {(selectedServer.creationDate || selectedServer.firstInvoiceDate) && (
-                        <span style={{ marginLeft: 12, color: T.muted }}>
-                          📅 Créé: {fmtDate(selectedServer.creationDate || selectedServer.firstInvoiceDate)}
-                        </span>
-                      )}
-                      {(selectedServer.renewalDate || selectedServer.expirationDate) && (
-                        <span style={{ marginLeft: 12, color: T.amber, fontWeight: 600 }}>
-                          🔄 Renouvellement: {fmtDate(selectedServer.renewalDate || selectedServer.expirationDate)}
-                        </span>
-                      )}
-                    </p>
-                  </div>
-                  <select
-                    value={selectedServer.name}
-                    onChange={e => { const srv = servers.find(s => s.name === e.target.value); if (srv) setSelectedServer(srv); }}
-                    style={{ padding: '9px 14px', borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', background: 'white', color: T.slate }}
-                  >
-                    {servers.map(s => <option key={s.name} value={s.name}>{s.name} ({s.type})</option>)}
-                  </select>
-                </div>
-                {chartsLoading ? (
-                  <div style={{ background: 'white', borderRadius: 16, padding: 80, textAlign: 'center', color: '#94a3b8', border: `1px solid ${T.border}` }}>
-                    <RefreshCw size={32} style={{ opacity: 0.3, margin: '0 auto 12px', display: 'block', animation: 'spin 2s linear infinite' }} />
-                    <p style={{ marginTop: 8, fontSize: 14 }}>Chargement des métriques...</p>
-                  </div>
-                ) : timeSeriesData.length === 0 ? (
-                  <div style={{ background: 'white', borderRadius: 16, padding: 60, textAlign: 'center', color: '#94a3b8', border: `1px solid ${T.border}` }}>
-                    <Activity size={48} style={{ opacity: 0.15, margin: '0 auto 16px', display: 'block' }} />
-                    <p style={{ fontSize: 14, fontWeight: 600 }}>Aucune donnée temps réel disponible</p>
-                  </div>
-                ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(480px, 1fr))', gap: 16 }}>
-                    <ResourceChart data={timeSeriesData} metricKey="cpu_usage"  label="CPU Usage"  unit="%" color={T.blue} />
-                    <ResourceChart data={timeSeriesData} metricKey="ram_usage"  label="RAM Usage"  unit="GB" color={T.purple} />
-                    <ResourceChart data={timeSeriesData} metricKey="disk_usage" label="Disk Usage" unit="GB" color="#f97316" />
-                  </div>
-                )}
-              </>
-            ) : (
-              <div style={{ background: 'white', borderRadius: 16, padding: 80, textAlign: 'center', color: '#94a3b8', border: `1px solid ${T.border}` }}>
-                <p style={{ fontSize: 15, fontWeight: 700, color: '#374151' }}>Sélectionnez un serveur depuis l'onglet Serveurs</p>
-              </div>
-            )}
           </div>
         )}
 

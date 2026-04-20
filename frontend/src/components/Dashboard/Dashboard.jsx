@@ -1549,24 +1549,24 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
     const dateStr = now.toLocaleDateString('fr-FR', { day:'2-digit', month:'long', year:'numeric' });
     const timeStr = now.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
 
-    // Build top services table rows
-    const topRows = Object.entries(analytics.itemTotals||{})
-      .sort((a,b)=>b[1]-a[1]).slice(0,20)
-      .map(([name,total],i) => {
-        const cat = detectOvhCategory(name);
-        const pct = analytics.total>0 ? ((total/analytics.total)*100).toFixed(1) : '0.0';
-        const tva = total*0.2; const ttc = total*1.2;
-        const catColor = CAT_COLOR_MAP[cat]||'#64748b';
-        return `<tr class="${i%2===0?'even':'odd'}">
-          <td class="rank">#${i+1}</td>
-          <td class="service-name">${extractRef(name)}</td>
-          <td><span class="badge" style="background:${catColor}20;color:${catColor};border:1px solid ${catColor}40">${cat}</span></td>
-          <td class="amount">${fmt2(total)} €</td>
-          <td class="amount muted">${fmt2(tva)} €</td>
-          <td class="amount">${fmt2(ttc)} €</td>
-          <td><div class="bar-wrap"><div class="bar-fill" style="width:${Math.min(parseFloat(pct),100)}%;background:${catColor}"></div></div><span class="pct">${pct}%</span></td>
-        </tr>`;
-      }).join('');
+    // ── Build per-month data payload for interactive Top 20 ──
+    const top20ByMonth = { all: {} };
+    filtered.forEach(c => {
+      const k = extractRef(c.service_name) || c.service_name;
+      top20ByMonth.all[k] = (top20ByMonth.all[k]||0) + Number(c.amount||0);
+      const d = parseDate(c.cost_date); if (!d) return;
+      const mKey = getMonthKey(d);
+      if (!top20ByMonth[mKey]) top20ByMonth[mKey] = {};
+      top20ByMonth[mKey][k] = (top20ByMonth[mKey][k]||0) + Number(c.amount||0);
+    });
+    const top20CatColors = {};
+    Object.keys(top20ByMonth.all).forEach(name => {
+      const cat = detectOvhCategory(name);
+      top20CatColors[name] = { cat, color: CAT_COLOR_MAP[cat]||'#64748b' };
+    });
+    const top20DataJson   = JSON.stringify(top20ByMonth).replace(/</g,'\\u003c').replace(/>/g,'\\u003e');
+    const top20CatJson    = JSON.stringify(top20CatColors).replace(/</g,'\\u003c').replace(/>/g,'\\u003e');
+    const top20MonthsJson = JSON.stringify(analytics.allMonths||[]);
 
     // Build monthly evolution table
     const monthRows = (analytics.byMonth||[]).map((m,i) => {
@@ -1632,6 +1632,66 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
       ? `<span style="color:#16a34a;background:#f0fdf4;padding:3px 10px;border-radius:99px;border:1px solid #bbf7d0;font-size:12px">▼ ${analytics.trendPct}% vs mois préc.</span>`
       : '';
 
+    // ── Bar Chart SVG: Servers vs Services by month ──
+    const chartMonths = analytics.allMonths || [];
+    const serverByMonth = {};
+    const servicByMonth = {};
+    filtered.forEach(c => {
+      const d = parseDate(c.cost_date); if (!d) return;
+      const key = getMonthKey(d);
+      const cat = detectOvhCategory(c.service_name);
+      const amt = Number(c.amount||0);
+      if (isServer(cat)) serverByMonth[key] = (serverByMonth[key]||0) + amt;
+      else servicByMonth[key] = (servicByMonth[key]||0) + amt;
+    });
+    const chartData = chartMonths.map(m => ({
+      label: m.label,
+      servers: serverByMonth[m.key]||0,
+      services: servicByMonth[m.key]||0,
+    }));
+    const maxBarVal = Math.max(...chartData.map(d => d.servers + d.services), 1);
+    const svgW = 900; const svgH = 260; const padL = 70; const padB = 50; const padT = 20; const padR = 20;
+    const chartW = svgW - padL - padR;
+    const chartH = svgH - padT - padB;
+    const barGroupW = chartData.length > 0 ? chartW / chartData.length : chartW;
+    const barW = Math.max(Math.min(barGroupW * 0.35, 32), 6);
+    const barGap = barW * 0.3;
+    const barSvg = chartData.length === 0 ? '<text x="450" y="130" text-anchor="middle" fill="#94a3b8" font-size="13">Aucune donnée mensuelle</text>' : chartData.map((d, i) => {
+      const cx = padL + i * barGroupW + barGroupW / 2;
+      const sH = (d.servers / maxBarVal) * chartH;
+      const svH = (d.services / maxBarVal) * chartH;
+      const sY = padT + chartH - sH;
+      const svY = padT + chartH - svH;
+      const sx = cx - barW - barGap / 2;
+      const svx = cx + barGap / 2;
+      const lbl = d.label.split(' ')[0]; // short month
+      return `
+        <rect x="${sx}" y="${sY}" width="${barW}" height="${sH}" rx="3" fill="#2563EB" opacity="0.85"/>
+        <rect x="${svx}" y="${svY}" width="${barW}" height="${svH}" rx="3" fill="#0891B2" opacity="0.85"/>
+        <text x="${cx}" y="${padT + chartH + 18}" text-anchor="middle" fill="#64748b" font-size="10">${lbl}</text>
+      `;
+    }).join('');
+    // Y axis labels
+    const yLabels = [0, 0.25, 0.5, 0.75, 1].map(r => {
+      const val = maxBarVal * r;
+      const y = padT + chartH - r * chartH;
+      const label = val >= 1000 ? `${(val/1000).toFixed(1)}k` : Math.round(val).toString();
+      return `<text x="${padL - 8}" y="${y + 4}" text-anchor="end" fill="#94a3b8" font-size="10">${label}</text>
+              <line x1="${padL}" y1="${y}" x2="${svgW - padR}" y2="${y}" stroke="#f1f5f9" stroke-width="1"/>`;
+    }).join('');
+    const barChartSvg = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${svgW} ${svgH}" style="width:100%;height:auto;display:block">
+      ${yLabels}
+      ${barSvg}
+      <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT+chartH}" stroke="#e2e8f0" stroke-width="1.5"/>
+      <line x1="${padL}" y1="${padT+chartH}" x2="${svgW-padR}" y2="${padT+chartH}" stroke="#e2e8f0" stroke-width="1.5"/>
+      <!-- legend -->
+      <rect x="${padL}" y="${svgH - 16}" width="10" height="10" rx="2" fill="#2563EB"/>
+      <text x="${padL + 14}" y="${svgH - 7}" fill="#374151" font-size="11">Infra Serveurs (VPS &amp; Dédiés)</text>
+      <rect x="${padL + 200}" y="${svgH - 16}" width="10" height="10" rx="2" fill="#0891B2"/>
+      <text x="${padL + 214}" y="${svgH - 7}" fill="#374151" font-size="11">Services / Options (IP, Snap, DNS…)</text>
+    </svg>`;
+
     const html = `<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -1641,7 +1701,19 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8fafc;color:#0f172a;font-size:13px}
-  @media print{body{background:white}.page-break{page-break-before:always}}
+  @media print{
+    body{background:white}
+    .page-break{page-break-before:always}
+    .no-print{display:none!important}
+    button{display:none!important}
+    @page{margin:18mm 15mm}
+  }
+
+  /* PRINT BUTTON */
+  .print-bar{position:sticky;top:0;z-index:999;background:white;border-bottom:1.5px solid #e2e8f0;padding:10px 32px;display:flex;align-items:center;gap:12px}
+  .print-btn{display:inline-flex;align-items:center;gap:7px;padding:9px 20px;background:#1B5E46;color:white;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px rgba(27,94,70,.3)}
+  .print-btn:hover{background:#155e3e}
+  .print-hint{font-size:11px;color:#94a3b8}
 
   /* HEADER */
   .report-header{background:linear-gradient(135deg,#0f2027 0%,#1B5E46 60%,#2563EB 100%);padding:40px 48px 32px;color:white;position:relative;overflow:hidden}
@@ -1678,6 +1750,11 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
   .fiscal-item .sub{font-size:11px;color:#64748b;margin-top:3px}
   .fiscal-sep{font-size:28px;color:#cbd5e1;font-weight:200;flex-shrink:0}
 
+  /* CHART BOX */
+  .chart-box{background:white;border-radius:14px;border:1.5px solid #e8edf5;padding:22px 24px;margin-bottom:24px;box-shadow:0 1px 6px rgba(0,0,0,.04)}
+  .chart-title{font-size:14px;font-weight:800;color:#0f172a;margin-bottom:4px}
+  .chart-sub{font-size:11px;color:#94a3b8;margin-bottom:16px}
+
   /* TABLES */
   .table-wrap{background:white;border-radius:14px;border:1.5px solid #e8edf5;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.04)}
   table{width:100%;border-collapse:collapse}
@@ -1708,6 +1785,12 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
 </style>
 </head>
 <body>
+
+<!-- ═══ PRINT BAR (hidden on print) ═══ -->
+<div class="print-bar no-print">
+  <button class="print-btn" onclick="window.print()">🖨️ Imprimer / Enregistrer en PDF</button>
+  <span class="print-hint">Dans la boîte de dialogue impression, choisissez <strong>« Enregistrer en PDF »</strong> comme imprimante</span>
+</div>
 
 <!-- ═══════════════ HEADER ═══════════════ -->
 <div class="report-header">
@@ -1758,16 +1841,6 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
       <div class="kpi-value">${fmt2(analytics.maxCost)} <span class="kpi-unit">€</span></div>
       <div class="kpi-sub">${analytics.maxEntry?shortName(analytics.maxEntry.service_name,28):'—'}</div>
     </div>
-    <div class="kpi-card" style="border-top:3px solid #1B5E46">
-      <div class="kpi-label">Infra Serveurs</div>
-      <div class="kpi-value">${fmt2(analytics.totalServers)} <span class="kpi-unit">€</span></div>
-      <div class="kpi-sub">VPS & Dédiés</div>
-    </div>
-    <div class="kpi-card" style="border-top:3px solid #0891B2">
-      <div class="kpi-label">Services / Options</div>
-      <div class="kpi-value">${fmt2(analytics.totalServices)} <span class="kpi-unit">€</span></div>
-      <div class="kpi-sub">IP, Snapshots, DNS…</div>
-    </div>
   </div>
 </div>
 
@@ -1799,23 +1872,135 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
   </div>
 </div>
 
-<!-- ═══════════════ TOP SERVICES ═══════════════ -->
+<!-- ═══════════════ GRAPHE SERVEURS VS SERVICES ═══════════════ -->
 <div class="section page-section">
-  <div class="section-title"><span class="icon" style="background:#faf5ff">🏆</span>Top 20 services — Classement par coût HT</div>
+  <div class="section-title"><span class="icon" style="background:#eff6ff">📈</span>Évolution mensuelle — Serveurs vs Services</div>
+  <div class="chart-box">
+    <div class="chart-title">🖥️ Infra Serveurs (VPS &amp; Dédiés) vs ⚙️ Services / Options</div>
+    <div class="chart-sub">Comparaison mensuelle des coûts HT par type de ressource</div>
+    ${barChartSvg}
+  </div>
+</div>
+
+<!-- ═══════════════ TOP SERVICES ═══════════════ -->
+<div class="section page-section" id="top20-section">
+
+  <script>
+    var TOP20_DATA   = ${top20DataJson};
+    var TOP20_CATS   = ${top20CatJson};
+    var TOP20_MONTHS = ${top20MonthsJson};
+    var fmt2r = function(v){ return Number(v||0).toLocaleString('fr-FR',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+
+    function renderTop20(mKey) {
+      var sel = document.getElementById('top20-select');
+      if (sel) sel.value = mKey;
+
+      // Update label
+      var labelEl = document.getElementById('top20-current-label');
+      if (labelEl) {
+        var txt = mKey === 'all' ? 'Tous les mois (cumulé)'
+          : (TOP20_MONTHS.find(function(m){return m.key===mKey;})||{label:mKey}).label;
+        labelEl.textContent = txt;
+        labelEl.style.color = mKey === 'all' ? '#1B5E46' : '#2563EB';
+      }
+
+      // Data
+      var data   = TOP20_DATA[mKey] || {};
+      var sorted = Object.entries(data).sort(function(a,b){return b[1]-a[1];}).slice(0,20);
+      var grand  = sorted.reduce(function(s,e){return s+e[1];},0);
+      var medals = ['🥇','🥈','🥉'];
+
+      // Tbody
+      var tbody = document.getElementById('top20-tbody');
+      if (tbody) tbody.innerHTML = sorted.length === 0
+        ? '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8;font-size:13px">📭 Aucune donnée pour cette période</td></tr>'
+        : sorted.map(function(e,i){
+            var name=e[0], total=e[1];
+            var info = TOP20_CATS[name]||{cat:'Autre',color:'#64748b'};
+            var cat=info.cat, color=info.color;
+            var pct=(grand>0?(total/grand*100).toFixed(1):'0.0');
+            var tva=total*.2, ttc=total*1.2;
+            var rank = i<3 ? medals[i]
+              : '<span style="font-weight:800;color:#94a3b8;font-size:11px">#'+(i+1)+'</span>';
+            var lb = i<3 ? 'border-left:3px solid '+(['#f59e0b','#9ca3af','#b45309'][i])
+                         : 'border-left:3px solid transparent';
+            return '<tr class="'+(i%2===0?'even':'odd')+'" style="'+lb+'">'
+              +'<td class="rank" style="font-size:15px">'+rank+'</td>'
+              +'<td class="service-name" title="'+name+'">'+name+'</td>'
+              +'<td><span class="badge" style="background:'+color+'20;color:'+color+';border:1px solid '+color+'40">'+cat+'</span></td>'
+              +'<td class="amount" style="color:#16a34a;font-size:13px;font-weight:800">'+fmt2r(total)+' €</td>'
+              +'<td class="amount" style="color:#7C3AED">'+fmt2r(tva)+' €</td>'
+              +'<td class="amount" style="color:#0891B2;font-weight:700">'+fmt2r(ttc)+' €</td>'
+              +'<td><div class="bar-wrap" style="width:88px"><div class="bar-fill" style="width:'+Math.min(parseFloat(pct),100)+'%;background:'+color+'"></div></div>'
+              +'<span class="pct">'+pct+'%</span></td>'
+              +'</tr>';
+          }).join('');
+
+      // Tfoot
+      var tfoot = document.getElementById('top20-tfoot');
+      if (tfoot) tfoot.innerHTML = grand>0
+        ? '<tr style="background:#f0fdf4;font-weight:800">'
+          +'<td colspan="3" style="padding:10px 14px;color:#1B5E46;font-size:12px">Σ Total Top '+sorted.length+'</td>'
+          +'<td class="amount" style="color:#16a34a;font-size:13px">'+fmt2r(grand)+' €</td>'
+          +'<td class="amount" style="color:#7C3AED">'+fmt2r(grand*.2)+' €</td>'
+          +'<td class="amount" style="color:#0891B2">'+fmt2r(grand*1.2)+' €</td>'
+          +'<td class="pct" style="text-align:right;color:#94a3b8">100%</td>'
+          +'</tr>' : '';
+
+      // Count badge
+      var badge = document.getElementById('top20-count');
+      if (badge) badge.textContent = sorted.length+' services · '+fmt2r(grand)+' € HT';
+    }
+  </script>
+
+  <!-- Header row -->
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px;padding-bottom:14px;border-bottom:2px solid #e2e8f0">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="icon" style="background:#faf5ff;width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:16px">🏆</span>
+      <div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:17px;font-weight:800;color:#0f172a">Top 20 services</span>
+          <span style="font-size:10px;font-weight:700;color:#7C3AED;background:#f5f3ff;padding:2px 9px;border-radius:99px;border:1px solid #ddd6fe">Classement par coût HT</span>
+        </div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:2px" id="top20-count"></div>
+      </div>
+    </div>
+
+    <!-- Dropdown selector -->
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:12px;color:#64748b;font-weight:600">Période :</span>
+      <div style="position:relative;display:inline-flex;align-items:center">
+        <span style="position:absolute;left:11px;font-size:14px;pointer-events:none;z-index:1">📅</span>
+        <select id="top20-select" onchange="renderTop20(this.value)"
+          style="padding:8px 36px 8px 34px;border-radius:10px;border:1.5px solid #1B5E46;font-family:inherit;font-size:13px;font-weight:700;color:#1B5E46;background:white;cursor:pointer;appearance:none;-webkit-appearance:none;min-width:200px;box-shadow:0 1px 6px rgba(27,94,70,.12)">
+          <option value="all">📊 Tous les mois (cumulé)</option>
+          ${(analytics.allMonths||[]).map(m =>
+            `<option value="${m.key}">📅 ${m.label}</option>`
+          ).join('')}
+        </select>
+        <span style="position:absolute;right:11px;pointer-events:none;color:#1B5E46;font-size:11px">▾</span>
+      </div>
+      <div style="font-size:12px;color:#64748b">→ <strong id="top20-current-label" style="color:#1B5E46">Tous les mois (cumulé)</strong></div>
+    </div>
+  </div>
+
+  <!-- Table -->
   <div class="table-wrap">
     <table>
       <thead><tr>
-        <th style="width:36px">#</th>
+        <th style="width:44px;text-align:center">#</th>
         <th>Service / Référence</th>
         <th>Catégorie</th>
         <th style="text-align:right">Montant HT</th>
         <th style="text-align:right">TVA 20%</th>
         <th style="text-align:right">TTC</th>
-        <th>Part du total</th>
+        <th style="min-width:120px">Part du total</th>
       </tr></thead>
-      <tbody>${topRows}</tbody>
+      <tbody id="top20-tbody"></tbody>
+      <tfoot id="top20-tfoot"></tfoot>
     </table>
   </div>
+  <script>renderTop20('all');</script>
 </div>
 
 <!-- ═══════════════ PAR CATÉGORIE ═══════════════ -->
@@ -1845,7 +2030,7 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
         <th style="text-align:right">Total HT</th>
         <th style="text-align:right">TVA 20%</th>
         <th style="text-align:right">TTC</th>
-        <th>Part</th>
+        <th class="pct">Part</th>
       </tr></thead>
       <tbody>${srcRows}</tbody>
     </table>
@@ -1854,7 +2039,7 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
 
 <!-- ═══════════════ ÉVOLUTION MENSUELLE ═══════════════ -->
 <div class="section page-section page-break">
-  <div class="section-title"><span class="icon" style="background:#eff6ff">📈</span>Évolution mensuelle des coûts</div>
+  <div class="section-title"><span class="icon" style="background:#eff6ff">📅</span>Évolution mensuelle des coûts</div>
   <div class="table-wrap">
     <table>
       <thead><tr>
@@ -1901,11 +2086,12 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
 
     const blob = new Blob([html], { type:'text/html;charset=utf-8' });
     const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = `rapport-finops-${now.toISOString().slice(0,10)}.html`;
-    a.click(); URL.revokeObjectURL(url);
+    const win  = window.open(url, '_blank');
+    if (win) {
+      win.addEventListener('load', () => { setTimeout(() => { win.print(); }, 400); });
+    }
     setExportMenuOpen(false);
-    toast.success('📄 Rapport HTML détaillé téléchargé !');
+    toast.success('📄 Rapport ouvert — choisissez "Enregistrer en PDF" dans l\'impression !');
   };
 
   const isEmptyState = !loading && !filtered.length;
@@ -1962,14 +2148,14 @@ Object.entries(refCostRaw).forEach(([serviceName, refs]) => {
                     <div style={{ fontSize:10,color:'#94a3b8',fontWeight:400 }}>Données brutes — {filtered.length} lignes</div>
                   </div>
                 </button>
-                <button onClick={handleExportReport} style={{ display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 14px',background:'white',border:'none',fontFamily:'inherit',cursor:'pointer',textAlign:'left',fontSize:13,color:'#374151',fontWeight:600 }}
+                <button onClick={handleExportReport} style={{ display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 14px',background:'white',border:'none',fontFamily:'inherit',cursor:'pointer',textAlign:'left',fontSize:13,color:'#374151',fontWeight:600,borderBottom:'1px solid #f8fafc' }}
                   onMouseEnter={e=>e.currentTarget.style.background='#f8fafc'} onMouseLeave={e=>e.currentTarget.style.background='white'}>
-                  <div style={{ width:28,height:28,borderRadius:8,background:'#eff6ff',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0 }}>
-                    <FileBarChart size={13} color="#2563EB"/>
+                  <div style={{ width:28,height:28,borderRadius:8,background:'#fef2f2',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0 }}>
+                    <FileBarChart size={13} color="#ef4444"/>
                   </div>
                   <div>
-                    <div>Rapport détaillé HTML</div>
-                    <div style={{ fontSize:10,color:'#94a3b8',fontWeight:400 }}>KPIs · classements · évolution · détails</div>
+                    <div>Rapport détaillé PDF</div>
+                    <div style={{ fontSize:10,color:'#94a3b8',fontWeight:400 }}>Top 20 filtrable par mois dans le rapport</div>
                   </div>
                 </button>
               </div>

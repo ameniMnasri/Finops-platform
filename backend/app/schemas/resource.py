@@ -15,7 +15,10 @@ class ResourceMetricCreate(BaseModel):
     server_name: Optional[str] = Field(None, max_length=255, description="Server or host identifier")
     server_type: Optional[str] = Field(None, max_length=20, description="Server type: VPS or DEDICATED")
     recorded_at: Optional[datetime] = Field(None, description="Timestamp of the metric (defaults to now)")
-
+    creation_date:   Optional[datetime] = None   # from /serviceInfos → "creation"
+    expiration_date: Optional[datetime] = None   # from /serviceInfos → "expiration"
+    ovh_state:       Optional[str]      = None   # "ok" | "expired" | "suspended"
+    ovh_offer:       Optional[str]      = None   # offer/plan label
     @validator("cpu_usage", pre=True, always=True)
     def validate_cpu(cls, v):
         if v is None:

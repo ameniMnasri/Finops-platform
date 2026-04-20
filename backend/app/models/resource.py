@@ -12,3 +12,7 @@ class ResourceMetric(Base):
     server_type = Column(String(20), nullable=True, comment="VPS or DEDICATED")
     recorded_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    creation_date   = Column(DateTime, nullable=True)   # e.g. 2023-03-15T00:00:00+01:00
+    expiration_date = Column(DateTime, nullable=True)   # renewal/expiration deadline
+    ovh_state       = Column(String,   nullable=True)   # "ok" | "expired" | "suspended" …
+    ovh_offer       = Column(String,   nullable=True)   # "VPS Comfort 4-8-160" | "RISE-1" …

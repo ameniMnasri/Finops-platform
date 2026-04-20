@@ -1,9 +1,11 @@
-// Anomalies.jsx — Détection d'Anomalies Budgétaires FinOps v6
-// CORRECTIONS v6 :
-//  1. Filtre "Catégorie MoM" : par référence serveur exacte OU par service_name
-//  2. expected_value label correct selon le contexte (pair group vs mois précédent)
-//  3. Explication claire du seuil IF et du coût normal
-//  4. mom_groupby passé à l'API selon le choix du filtre
+// Anomalies.jsx — Détection d'Anomalies Budgétaires FinOps v8
+// FIXES v8 :
+//  FIX 1 — momMode : parsé depuis "_mom=service" ou "_mom=ref" dans threshold_type
+//           (backend v7 encode toujours ce tag → "inconnu" disparaît)
+//  FIX 2 — data_gap guard : si variation == -100% ET expected > 0 ET observed == 0
+//           → card neutre "Données indisponibles" au lieu de "-100.0%"
+//  FIX 3 — scope label : affiche "service global (toutes refs)" ou "référence exacte"
+//           pour clarifier que observed et expected sont au même niveau d'agrégation
 import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   AlertTriangle, AlertCircle, CheckCircle, Brain,
@@ -38,6 +40,7 @@ const SEV = {
 };
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
+const _r          = (v, d = 2) => v == null ? 0 : Math.round(v * 10 ** d) / 10 ** d;
 const fmtDate     = d => d ? new Date(d).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' }) : '—';
 const fmtDateTime = d => d ? new Date(d).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
 const fmtEuro     = v => v != null ? `${Number(v).toFixed(2)} €` : '—';
@@ -54,35 +57,68 @@ function scoreLevel(score) {
 }
 
 // ─── Parse description ────────────────────────────────────────────────────────
+// Supporte les deux formats backend :
+//   "MoM: +12.34% (+56.78€, prev=100.00€ → cur=156.78€)"
+//   "Hausse de 12.34% (+56.78€)"
 function parseDesc(desc) {
   if (!desc) return {};
-  const refMatch      = desc.match(/\bref=([^\s.,]+)/i);
-  const varPctMatch   = desc.match(/hausse de ([+-]?[\d.]+)%/i) || desc.match(/MoM\s*:\s*([+-]?[\d.]+)%/i);
-  const diffMatch     = desc.match(/\(([+-]?[\d.]+)€\)/);
+
+  // ref= dans la description (format "ref=ns31546254.ip-…")
+  const refMatch = desc.match(/\bref=([^\s|,]+)/i);
+
+  // MoM variation % — deux formats possibles
+  const varPctMatch = desc.match(/MoM\s*:\s*([+-]?[\d.]+)%/i)
+                   || desc.match(/hausse de ([+-]?[\d.]+)%/i);
+
+  // Diff monetaire — entre parenthèses : (+56.78€)
+  const diffMatch = desc.match(/MoM\s*:\s*[+-]?[\d.]+%\s*\(([+-]?[\d.]+)€/i)
+                 || desc.match(/\(([+-]?[\d.]+)€\)/);
+
+  // prev= et cur= dans la description (format backend v7)
+  const prevMatch = desc.match(/prev=([\d.]+)€/i);
+  const curMatch  = desc.match(/cur=([\d.]+)€/i);
+
+  // Formats legacy (Mois précédent: / Mois courant:)
+  const prevLegacy = desc.match(/Mois précédent\s*:\s*([\d.]+)€/i);
+  const curLegacy  = desc.match(/(?:Mois courant|Courant)\s*:\s*([\d.]+)€/i);
+
   const overcostMatch = desc.match(/Surcoût\s*(?:MoM)?\s*:\s*\+?([\d.]+)€/i);
-  const curCostMatch  = desc.match(/Mois courant\s*:\s*([\d.]+)€/i);
-  const prevCostMatch = desc.match(/Mois précédent\s*:\s*([\d.]+)€/i);
-  const total         = desc.match(/total[=:\s]+([\d.]+)€/i)?.[1];
-  const avg           = desc.match(/moy[.\s]+([\d.]+)€/i)?.[1];
-  const n             = desc.match(/parmi (\d+) services/i)?.[1];
+  const nMatch        = desc.match(/_n=(\d+)/i);
 
   return {
-    ref:          refMatch      ? refMatch[1]                    : null,
-    total:        total         ? parseFloat(total)              : null,
-    avg:          avg           ? parseFloat(avg)                : null,
-    n:            n             ? parseInt(n)                    : null,
-    momVariation: varPctMatch   ? parseFloat(varPctMatch[1])     : null,
-    momDiff:      diffMatch     ? parseFloat(diffMatch[1])       : null,
-    overcost:     overcostMatch ? parseFloat(overcostMatch[1])   : null,
-    currentCost:  curCostMatch  ? parseFloat(curCostMatch[1])    : null,
-    previousCost: prevCostMatch ? parseFloat(prevCostMatch[1])   : null,
+    ref:          refMatch      ? refMatch[1]                             : null,
+    momVariation: varPctMatch   ? parseFloat(varPctMatch[1])             : null,
+    momDiff:      diffMatch     ? parseFloat(diffMatch[1])               : null,
+    previousCost: prevMatch     ? parseFloat(prevMatch[1])
+                : prevLegacy    ? parseFloat(prevLegacy[1])              : null,
+    currentCost:  curMatch      ? parseFloat(curMatch[1])
+                : curLegacy     ? parseFloat(curLegacy[1])               : null,
+    overcost:     overcostMatch ? parseFloat(overcostMatch[1])           : null,
+    n:            nMatch        ? parseInt(nMatch[1])                    : null,
   };
 }
 
-// ─── Parse MoM depuis threshold_type ─────────────────────────────────────────
+// ─── FIX 1 — Parse momMode depuis threshold_type ──────────────────────────────
+// Backend v7 encode : "if_score<-0.08_n=59_mom=service" ou "_mom=ref"
+//                     "mom_service>50%"  ou  "mom_ref>50%"
+function parseMomMode(tt) {
+  if (!tt) return 'service';   // défaut sûr
+
+  // Format IF v7 : _mom=service | _mom=ref
+  const ifMomMatch = tt.match(/_mom=(service|ref)/i);
+  if (ifMomMatch) return ifMomMatch[1];
+
+  // Format MoM pur : mom_service>… | mom_ref>…
+  if (tt.includes('mom_ref'))     return 'ref';
+  if (tt.includes('mom_service')) return 'service';
+
+  return 'service';   // fallback
+}
+
+// Parse variation + diff depuis threshold_type (MoM pur uniquement)
 function parseMomFromThreshold(tt) {
   if (!tt) return null;
-  const momMatch  = tt.match(/mom=([+-]?[\d.]+)%/);
+  const momMatch  = tt.match(/mom_(?:service|ref)>([\d.]+)%/);
   const diffMatch = tt.match(/diff=([+-]?[\d.]+)/);
   if (!momMatch && !diffMatch) return null;
   return {
@@ -102,10 +138,38 @@ function anomalySignals(anomaly) {
   const tt  = anomaly.threshold_type ?? '';
   const mom = parseMomFromThreshold(tt) || parseDescMom(anomaly.description);
   const isIF  = anomaly.anomaly_score != null;
-  const isMom = tt.includes('mom_variation') ||
+  const isMom = tt.includes('mom_service') || tt.includes('mom_ref') ||
                 mom?.variation != null ||
                 parseDesc(anomaly.description).momVariation != null;
   return { isIF, isMom, mom };
+}
+
+// ─── FIX v9 — Data gap vs COST_DROP ─────────────────────────────────────────
+// AVANT : observed==0 et expected>0 → toujours "Données manquantes" (FAUX)
+// APRÈS :
+//   • COST_DROP = service disparu (prev>0, cur=0, description = "Chute MoM")
+//     → afficher "0.00€ — Service non facturé ce mois" avec la variation correcte
+//   • DATA_GAP  = facture pas encore émise (début de mois seulement)
+//     → afficher "⚠️ Mois courant vide"
+function isDataGap(anomaly) {
+  const desc = (anomaly.description || '').toLowerCase();
+  if (desc.includes('chute mom') || desc.includes('cost_drop') || desc.includes('disappeared')) {
+    return false;   // c'est un vrai COST_DROP, pas un gap de données
+  }
+  if (desc.includes('data_gap') || desc.includes('pas encore')) {
+    return true;    // explicitement marqué data_gap par le backend
+  }
+  // Fallback : observed=0 uniquement en tout début de mois (≤ 5e jour)
+  const det = anomaly.detected_at ? new Date(anomaly.detected_at) : null;
+  const earlyMonth = det ? det.getDate() <= 5 : false;
+  return (anomaly.observed_value ?? 0) === 0 && (anomaly.expected_value ?? 0) > 0 && earlyMonth;
+}
+
+// Vrai COST_DROP = service qui existait le mois dernier mais plus ce mois
+function isCostDrop(anomaly) {
+  const desc = (anomaly.description || '').toLowerCase();
+  if (desc.includes('chute mom') || desc.includes('cost_drop')) return true;
+  return (anomaly.observed_value ?? 0) === 0 && (anomaly.expected_value ?? 0) > 0 && !isDataGap(anomaly);
 }
 
 // ─── Référence OVH ────────────────────────────────────────────────────────────
@@ -130,43 +194,31 @@ function getWhyText(anomaly) {
 
   const parts = [];
 
-  if (isIF && deviationPct != null) {
-    const dir   = deviationPct > 0 ? 'supérieur' : 'inférieur';
-    const times = Math.abs(deviationPct / 100 + 1).toFixed(1);
+  if (isIF && expected != null) {
+    const dir = observed > expected ? 'supérieur' : 'inférieur';
     parts.push(
-      `[Signal 1 — IF] Ce service affiche un coût de ${fmtEuro(observed)}, `
-      + `soit ${Math.abs(deviationPct).toFixed(0)}% ${dir} à la moyenne `
-      + `des services comparables (référence : ${fmtEuro(expected)}). `
-      + `Isolation Forest l'a isolé parmi ${parsed.n ?? '?'} services car il faut `
-      + `${times}× moins de décisions — signe d'un profil budgétaire très atypique.`
+      `[Signal 1 — IF] Score IF : ${score?.toFixed(4)} (seuil : -0.08). `
+      + `Ce service a été isolé comme outlier. `
+      + `Coût ce mois : ${fmtEuro(observed)} vs ${fmtEuro(expected)} le mois précédent `
+      + `(${dir} de ${Math.abs(deviationPct ?? 0).toFixed(1)}%).`
     );
   } else if (isIF) {
     parts.push(
       `[Signal 1 — IF] Score IF : ${score?.toFixed(4)} (seuil : -0.08). `
-      + `Ce service est outlier par rapport à ses pairs.`
+      + `Ce service est outlier — aucun historique MoM disponible pour comparaison temporelle.`
     );
   }
 
   if (isMom) {
     const v  = parsed.momVariation ?? parseMomFromThreshold(anomaly.threshold_type)?.variation;
     const d  = parsed.momDiff ?? parseMomFromThreshold(anomaly.threshold_type)?.diff;
-    const oc = parsed.overcost;
     if (v != null) {
       const sign = v >= 0 ? '+' : '';
       parts.push(
-        `[Signal 3 — MoM] Coût ${v >= 0 ? 'en hausse' : 'en baisse'} de `
+        `[Signal 2 — MoM] Coût ${v >= 0 ? 'en hausse' : 'en baisse'} de `
         + `${sign}${v.toFixed(1)}% vs le mois précédent`
-        + (d != null ? ` (${sign}${d.toFixed(2)}€)` : '')
-        + (oc != null && oc > 0 ? `. Surcoût réel : +${oc.toFixed(2)}€.` : '.')
+        + (d != null ? ` (${sign}${d.toFixed(2)}€).` : '.')
       );
-    }
-  }
-
-  if (!isIF && isMom) {
-    const cur  = parsed.currentCost  ?? observed;
-    const prev = parsed.previousCost ?? expected;
-    if (prev > 0) {
-      parts.push(`[Signal 2 — Peer] Mois courant : ${fmtEuro(cur)} vs mois précédent : ${fmtEuro(prev)}.`);
     }
   }
 
@@ -176,27 +228,25 @@ function getWhyText(anomaly) {
 
 // ─── Conseil FinOps ───────────────────────────────────────────────────────────
 function getAdvice(anomaly) {
-  const { isIF, isMom } = anomalySignals(anomaly);
-  const parsed          = parseDesc(anomaly.description);
-  const observed        = anomaly.observed_value;
-  const expected        = anomaly.expected_value;
-  const deviationPct    = expected && expected > 0
+  const parsed       = parseDesc(anomaly.description);
+  const observed     = anomaly.observed_value;
+  const expected     = anomaly.expected_value;
+  const deviationPct = expected && expected > 0
     ? ((observed - expected) / expected * 100) : null;
-  const momVar          = parsed.momVariation ?? parseMomFromThreshold(anomaly.threshold_type)?.variation;
+  const momVar       = parsed.momVariation ?? parseMomFromThreshold(anomaly.threshold_type)?.variation;
 
   if (momVar != null && momVar >= 100)
     return { text: `🚨 Forte hausse MoM : +${momVar.toFixed(0)}% vs le mois dernier. Vérifiez immédiatement : nouvelles ressources, auto-scaling, ou erreur de facturation.`, color: T.red, bg: T.redBg };
   if (momVar != null && momVar >= 50)
     return { text: `📈 Dérive budgétaire MoM : +${momVar.toFixed(0)}% vs mois dernier. Bloquez l'auto-scaling ou vérifiez les nouvelles ressources ajoutées récemment.`, color: T.orange, bg: T.orangeBg };
   if (deviationPct != null && deviationPct > 150)
-    return { text: `🚨 Action urgente : ce service coûte plus du double de la norme inter-services. Vérifiez immédiatement s'il est actif et si ses options sont justifiées.`, color: T.red, bg: T.redBg };
+    return { text: `🚨 Action urgente : ce service coûte plus du double du mois précédent. Vérifiez immédiatement s'il est actif et si ses options sont justifiées.`, color: T.red, bg: T.redBg };
   if (deviationPct != null && deviationPct > 75)
-    return { text: `⚠️ Audit recommandé : ce service est significativement plus cher que ses pairs. Comparez avec des services équivalents et vérifiez la tendance sur 3 mois.`, color: T.orange, bg: T.orangeBg };
+    return { text: `⚠️ Audit recommandé : ce service a augmenté de plus de 75% vs le mois dernier. Comparez avec des services équivalents et vérifiez la tendance sur 3 mois.`, color: T.orange, bg: T.orangeBg };
   return { text: `💡 Profil budgétaire atypique détecté. Surveillez l'évolution sur les prochaines périodes.`, color: T.teal, bg: T.tealBg };
 }
 
-/// ⭐ CORRECTED: Filtre MoM avec vraie différenciation
-
+// ─── CostInsightPanel ─────────────────────────────────────────────────────────
 function CostInsightPanel({ anomaly }) {
   const score    = anomaly.anomaly_score;
   const observed = anomaly.observed_value;
@@ -212,18 +262,34 @@ function CostInsightPanel({ anomaly }) {
 
   const momVar   = parsed.momVariation ?? parseMomFromThreshold(anomaly.threshold_type)?.variation;
   const momDiff  = parsed.momDiff      ?? parseMomFromThreshold(anomaly.threshold_type)?.diff;
-  const overcost = parsed.overcost ?? (momDiff != null && momDiff > 0 ? momDiff : null);
 
-  const curCost  = parsed.currentCost  ?? (isMom && !isIF ? observed : null);
-  const prevCost = parsed.previousCost ?? (isMom && !isIF ? expected : null);
+  // FIX 1 — momMode toujours résolu
+  const momMode  = parseMomMode(anomaly.threshold_type);
 
-  // ✅ NOUVEAU: Déterminer le mode MoM utilisé
-  const thresholdType = anomaly.threshold_type || '';
-  const momMode = thresholdType.includes('mom_ref') ? 'ref' : 
-                  thresholdType.includes('mom_service') ? 'service' :
-                  'inconnu';
+  // FIX 3 — scope label clair
+  const scopeLabel = momMode === 'ref'
+    ? 'référence exacte'
+    : 'service global (toutes refs)';
 
-  const nServices = anomaly.threshold_type?.match(/n=(\d+)/)?.[1] ?? '?';
+  const normalLabel = expected != null
+    ? `Coût mois précédent — ${scopeLabel}`
+    : null;
+
+  // FIX v9 — distinguer data_gap vs cost_drop
+  const dataGap  = isDataGap(anomaly);
+  const costDrop = isCostDrop(anomaly);
+
+  const nServices = anomaly.threshold_type?.match(/_n=(\d+)/)?.[1] ?? '?';
+
+  // Prorata = mois précédent partiel → comparaison MoM non fiable
+  const isProrata = (anomaly.entity_name ?? '').toLowerCase().includes('prorata')
+    || (anomaly.description ?? '').toLowerCase().includes('prorata');
+
+  // Diff négligeable = faux positif IF basé sur volatilité historique
+  const diffAbs = expected != null ? Math.abs(observed - expected) : null;
+  const isNegligibleDiff = diffAbs != null && diffAbs < 2
+    && Math.abs(deviationPct ?? 0) < 5;
+
   const ifExplain = isIF
     ? `Isolation Forest a entraîné des arbres de décision aléatoires sur ${nServices} services. `
       + `Les points normaux sont difficiles à isoler (ils ressemblent à leurs voisins). `
@@ -231,35 +297,44 @@ function CostInsightPanel({ anomaly }) {
       + `Double-gate appliqué : pred == -1 ET score < -0.08.`
     : null;
 
-  // ✅ LABEL CLAIR selon contexte
-  const normalLabel = isIF
-    ? `Moyenne inter-services (${nServices} services sur 90j) — VRAI MOYENNE`
-    : isMom && !isIF 
-    ? `Coût mois précédent (base MoM ${momMode === 'ref' ? 'par ref serveur' : 'par service'})`
-    : 'Référence';
-
   return (
     <div style={{ marginTop: 10, background: 'white', border: `1px solid ${T.border}`, borderLeft: `4px solid ${sl.color}`, borderRadius: 10, padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
 
-      {/* Header avec MODE MoM */}
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <Brain size={14} color={T.teal} />
         <span style={{ fontSize: 11, fontWeight: 800, color: T.teal, textTransform: 'uppercase', letterSpacing: '.08em' }}>
-          Analyse FinOps — {isIF && isMom ? '3 Signaux' : isIF ? 'IF + Peer' : 'MoM Temporal'}
+          Analyse FinOps — {isIF && isMom ? 'IF + MoM' : isIF ? 'IF Seul' : 'MoM Temporal'}
         </span>
         <span style={{ padding: '2px 10px', borderRadius: 99, fontSize: 10, fontWeight: 700, background: sl.bg, color: sl.color, border: `1px solid ${sl.color}44` }}>
           {sl.emoji} {sl.label}
         </span>
-        {isIF && <span style={{ padding: '2px 8px', borderRadius: 99, fontSize: 10, fontWeight: 700, background: T.tealBg, color: T.teal, border: '1px solid #5eead4' }}>🤖 IF</span>}
-        {isMom && (
+        {isIF && (
+          <span style={{ padding: '2px 8px', borderRadius: 99, fontSize: 10, fontWeight: 700, background: T.tealBg, color: T.teal, border: '1px solid #5eead4' }}>
+            🤖 IF
+          </span>
+        )}
+        {isMom && !dataGap && (
           <span style={{ padding: '2px 8px', borderRadius: 99, fontSize: 10, fontWeight: 700, background: T.orangeBg, color: T.orange, border: `1px solid ${T.orange}44` }}>
+            {/* FIX 1 — momMode jamais "inconnu" */}
             📅 MoM {momMode === 'ref' ? '🖥️ ref' : '📊 service'}
+          </span>
+        )}
+        {dataGap && (
+          <span style={{ padding: '2px 8px', borderRadius: 99, fontSize: 10, fontWeight: 700, background: T.amberBg, color: T.amber, border: `1px solid ${T.amber}44` }}>
+            ⚠️ Données manquantes ce mois
+          </span>
+        )}
+        {costDrop && !dataGap && (
+          <span style={{ padding: '2px 8px', borderRadius: 99, fontSize: 10, fontWeight: 700, background: T.redBg, color: T.red, border: `1px solid ${T.red}44` }}>
+            📉 Chute de coût — service non facturé ce mois
           </span>
         )}
       </div>
 
       {/* Métriques clés */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 10 }}>
+
         {/* Coût observé */}
         <div style={{ background: sl.bg, borderRadius: 10, padding: '14px 16px', border: `1px solid ${sl.color}33` }}>
           <p style={{ fontSize: 9, fontWeight: 800, color: sl.color, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>💰 Coût Réel (Anormal)</p>
@@ -269,44 +344,82 @@ function CostInsightPanel({ anomaly }) {
           </p>
         </div>
 
-        {/* Coût normal — label TRANSPARENT */}
-        <div style={{ background: T.greenBg, borderRadius: 10, padding: '14px 16px', border: '1px solid #6ee7b7' }}>
-          <p style={{ fontSize: 9, fontWeight: 800, color: T.green, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>
-            ✅ Coût Normal (Référence)
-          </p>
-          <p style={{ fontSize: 24, fontWeight: 900, color: T.green, margin: 0 }}>{fmtEuro(expected)}</p>
-          <p style={{ fontSize: 10, color: T.muted, marginTop: 4 }}>{normalLabel}</p>
-        </div>
-
-        {/* Δ MoM */}
-        {isMom && momVar != null && (
-          <div style={{ background: momVar > 0 ? T.redBg : T.greenBg, borderRadius: 10, padding: '14px 16px', border: `1px solid ${momVar > 0 ? '#fca5a5' : '#6ee7b7'}` }}>
-            <p style={{ fontSize: 9, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>📅 Δ vs Mois Dernier ({momMode})</p>
-            <p style={{ fontSize: 24, fontWeight: 900, color: momVar > 0 ? T.red : T.green, margin: 0 }}>{fmtPct(momVar)}</p>
-            {momDiff != null && (
-              <p style={{ fontSize: 10, color: T.muted, marginTop: 4 }}>
-                {momDiff >= 0 ? '+' : ''}{momDiff.toFixed(2)}€ vs mois précédent
-              </p>
-            )}
+        {/* Mois précédent — 4 cas : data gap / cost drop / valeur réelle / aucune */}
+        {dataGap ? (
+          <div style={{ background: T.amberBg, borderRadius: 10, padding: '14px 16px', border: `1px solid ${T.amber}44` }}>
+            <p style={{ fontSize: 9, fontWeight: 800, color: T.amber, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>
+              ⚠️ Données Manquantes
+            </p>
+            <p style={{ fontSize: 13, fontWeight: 700, color: T.amber, margin: 0 }}>Mois courant vide</p>
+            <p style={{ fontSize: 10, color: T.muted, marginTop: 4 }}>
+              Facturation pas encore émise — mois précédent : {fmtEuro(expected)}
+            </p>
+          </div>
+        ) : expected != null ? (
+          <div style={{ background: T.greenBg, borderRadius: 10, padding: '14px 16px', border: '1px solid #6ee7b7' }}>
+            <p style={{ fontSize: 9, fontWeight: 800, color: T.green, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>
+              📅 Mois Précédent (Référence MoM)
+            </p>
+            <p style={{ fontSize: 24, fontWeight: 900, color: T.green, margin: 0 }}>{fmtEuro(expected)}</p>
+            <p style={{ fontSize: 10, color: T.muted, marginTop: 4 }}>
+              {normalLabel}
+              {costDrop && <span style={{ color: T.red, fontWeight: 700 }}> — absent ce mois</span>}
+            </p>
+          </div>
+        ) : (
+          <div style={{ background: T.bg, borderRadius: 10, padding: '14px 16px', border: `1px solid ${T.border}` }}>
+            <p style={{ fontSize: 9, fontWeight: 800, color: T.muted, textTransform: 'uppercase' }}>
+              📊 Référence Temporelle
+            </p>
+            <p style={{ fontSize: 13, fontWeight: 700, color: T.muted, margin: 0 }}>Non disponible</p>
+            <p style={{ fontSize: 10, color: T.muted, marginTop: 4 }}>
+              IF a détecté via score seul — aucun historique MoM trouvé
+            </p>
           </div>
         )}
 
-        {/* Surcoût vs pairs (IF) */}
-        {isIF && deviationPct != null && (
-          <div style={{ background: deviationPct > 0 ? T.redBg : T.blueBg, borderRadius: 10, padding: '14px 16px', border: `1px solid ${deviationPct > 0 ? '#fca5a5' : '#93c5fd'}` }}>
-            <p style={{ fontSize: 9, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>
-              {deviationPct > 0
-                ? <><TrendingUp size={9} style={{ display: 'inline', marginRight: 3 }} />Surcoût vs Moyenne</>
-                : <><TrendingDown size={9} style={{ display: 'inline', marginRight: 3 }} />Sous-coût</>
-              }
-            </p>
-            <p style={{ fontSize: 24, fontWeight: 900, color: deviationPct > 0 ? T.red : T.blue, margin: 0 }}>
-              {deviationPct > 0 ? '+' : ''}{Math.abs(deviationPct).toFixed(2)}%
-            </p>
-            <p style={{ fontSize: 10, color: T.muted, marginTop: 4 }}>
-              {fmtEuro(Math.abs(observed - (expected ?? 0)))} au-dessus de la norme
-            </p>
-          </div>
+        {/* Δ mois précédent → mois courant — carte unifiée, sans ratio % */}
+        {expected != null && !dataGap && (
+          (() => {
+            const diff    = _r(observed - expected);
+            const isUp    = diff >= 0;
+            const acColor = isUp ? T.red   : T.green;
+            const acBg    = isUp ? T.redBg : T.greenBg;
+            const acBor   = isUp ? '#fca5a5' : '#6ee7b7';
+            const scopeTip = momMode === 'ref' ? 'ref exacte' : 'service global';
+            return (
+              <div style={{ background: 'white', borderRadius: 10, padding: '14px 16px', border: `1px solid ${T.border}` }}>
+                <p style={{ fontSize: 9, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 10 }}>
+                  📅 Évolution mois sur mois — {scopeTip}
+                </p>
+                {/* Ligne prev → cur */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <div style={{ flex: 1, background: T.bg, borderRadius: 8, padding: '8px 12px', textAlign: 'center', border: `1px solid ${T.border}` }}>
+                    <p style={{ fontSize: 9, color: T.muted, margin: '0 0 2px', textTransform: 'uppercase', letterSpacing: '.05em' }}>Mois précédent</p>
+                    <p style={{ fontSize: 16, fontWeight: 800, color: T.slate, margin: 0 }}>{fmtEuro(expected)}</p>
+                  </div>
+                  <div style={{ color: acColor, fontSize: 16, fontWeight: 800, lineHeight: 1 }}>→</div>
+                  <div style={{ flex: 1, background: acBg, borderRadius: 8, padding: '8px 12px', textAlign: 'center', border: `1px solid ${acBor}` }}>
+                    <p style={{ fontSize: 9, color: acColor, margin: '0 0 2px', textTransform: 'uppercase', letterSpacing: '.05em' }}>Mois courant</p>
+                    <p style={{ fontSize: 16, fontWeight: 800, color: acColor, margin: 0 }}>{fmtEuro(observed)}</p>
+                  </div>
+                </div>
+                {/* Diff € en gros */}
+                <div style={{ background: acBg, borderRadius: 8, padding: '8px 14px', border: `1px solid ${acBor}`, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {isUp
+                    ? <TrendingUp   size={14} color={acColor} />
+                    : <TrendingDown size={14} color={acColor} />
+                  }
+                  <span style={{ fontSize: 18, fontWeight: 900, color: acColor }}>
+                    {diff >= 0 ? '+' : ''}{diff.toFixed(2)} €
+                  </span>
+                  <span style={{ fontSize: 11, color: acColor, opacity: 0.8 }}>
+                    {isUp ? 'de plus' : 'de moins'} que le mois précédent
+                  </span>
+                </div>
+              </div>
+            );
+          })()
         )}
 
         {/* Score IF */}
@@ -322,30 +435,84 @@ function CostInsightPanel({ anomaly }) {
         )}
       </div>
 
-      {/* Explication transparente */}
+      {/* Explication IF */}
       {isIF && ifExplain && (
         <div style={{ background: T.tealBg, border: '1px solid #5eead4', borderRadius: 8, padding: '13px 16px' }}>
           <p style={{ fontSize: 10, fontWeight: 800, color: T.teal, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>🤖 Comment IF a détecté cette anomalie ?</p>
           <p style={{ fontSize: 12, color: '#134E4A', lineHeight: 1.7, margin: 0 }}>{ifExplain}</p>
-          <div style={{ marginTop: 8, padding: '8px 12px', background: 'white', borderRadius: 6, border: '1px solid #5eead4' }}>
-            <p style={{ fontSize: 11, fontWeight: 700, color: T.teal, margin: '0 0 4px' }}>📊 D'où vient le "coût normal" ({fmtEuro(expected)}) ?</p>
-            <p style={{ fontSize: 11, color: '#134E4A', margin: 0, lineHeight: 1.6 }}>
-              C'est la <strong>MOYENNE EXACTE des coûts totaux de {nServices} services</strong> sur 90 jours.
-              Formule : SUM(total par service) / {nServices} = {fmtEuro(expected)} €
-              <br/>
-              ✅ Cette valeur est <strong>vérifiable et transparente</strong> — voir logs du serveur.
-            </p>
-          </div>
+          {expected != null && !dataGap && (
+            <div style={{ marginTop: 8, padding: '8px 12px', background: 'white', borderRadius: 6, border: '1px solid #5eead4' }}>
+              <p style={{ fontSize: 11, fontWeight: 700, color: T.teal, margin: '0 0 4px' }}>
+                📅 Référence temporelle utilisée — {scopeLabel}
+              </p>
+              <p style={{ fontSize: 11, color: '#134E4A', margin: 0, lineHeight: 1.6 }}>
+                Coût mois précédent : <strong>{fmtEuro(expected)}</strong> → Ce mois : <strong>{fmtEuro(observed)}</strong>
+                <br/>
+                IF a détecté ce service comme outlier indépendamment de cette comparaison.
+                Le mois précédent sert uniquement de repère temporel.
+              </p>
+            </div>
+          )}
+          {dataGap && (
+            <div style={{ marginTop: 8, padding: '8px 12px', background: T.amberBg, borderRadius: 6, border: `1px solid ${T.amber}44` }}>
+              <p style={{ fontSize: 11, color: T.amber, margin: 0 }}>
+                ⚠️ Aucune donnée de facturation pour le mois courant — IF a détecté sur la base des données historiques.
+              </p>
+            </div>
+          )}
         </div>
       )}
 
       {/* Conseil FinOps */}
-      <div style={{ background: advice.bg, border: `1px solid ${advice.color}44`, borderRadius: 8, padding: '13px 16px' }}>
-        <p style={{ fontSize: 12, color: advice.color, fontWeight: 600, lineHeight: 1.6, margin: 0 }}>{advice.text}</p>
-      </div>
+      {!dataGap && !costDrop && (
+        <div style={{ background: advice.bg, border: `1px solid ${advice.color}44`, borderRadius: 8, padding: '13px 16px' }}>
+          <p style={{ fontSize: 12, color: advice.color, fontWeight: 600, lineHeight: 1.6, margin: 0 }}>{advice.text}</p>
+        </div>
+      )}
+      {costDrop && !dataGap && (
+        <div style={{ background: T.redBg, border: `1px solid ${T.red}44`, borderRadius: 8, padding: '13px 16px' }}>
+          <p style={{ fontSize: 12, color: T.red, fontWeight: 600, lineHeight: 1.6, margin: 0 }}>
+            📉 Ce service était facturé le mois dernier ({fmtEuro(expected)}) mais n'apparaît pas ce mois.
+            Vérifiez si la ressource a été résiliée, migrée, ou si la facture est en retard.
+          </p>
+        </div>
+      )}
+      {dataGap && (
+        <div style={{ background: T.amberBg, border: `1px solid ${T.amber}44`, borderRadius: 8, padding: '13px 16px' }}>
+          <p style={{ fontSize: 12, color: T.amber, fontWeight: 600, lineHeight: 1.6, margin: 0 }}>
+            ⚠️ Mois courant sans données de facturation. Attendez la prochaine émission de facture avant d'agir.
+          </p>
+        </div>
+      )}
+      {/* Warning : variation négligeable — faux positif IF volatilité */}
+      {isNegligibleDiff && !dataGap && !costDrop && (
+        <div style={{ background: T.amberBg, border: `1px solid ${T.amber}44`, borderRadius: 8, padding: '13px 16px' }}>
+          <p style={{ fontSize: 12, color: T.amber, fontWeight: 700, margin: '0 0 4px' }}>
+            ⚠️ Variation négligeable ({fmtEuro(diffAbs)} de différence)
+          </p>
+          <p style={{ fontSize: 12, color: T.amber, lineHeight: 1.6, margin: 0 }}>
+            IF a détecté ce service à cause de sa volatilité historique sur 90 jours,
+            pas d'une vraie anomalie de coût ce mois. Le coût actuel est quasi-identique au mois précédent.
+          </p>
+        </div>
+      )}
+
+      {/* Warning : prorata — mois précédent partiel */}
+      {isProrata && !dataGap && (
+        <div style={{ background: T.amberBg, border: `1px solid ${T.amber}44`, borderRadius: 8, padding: '13px 16px' }}>
+          <p style={{ fontSize: 12, color: T.amber, fontWeight: 700, margin: '0 0 4px' }}>
+            ⚠️ Mois précédent = facturation prorata (partielle)
+          </p>
+          <p style={{ fontSize: 12, color: T.amber, lineHeight: 1.6, margin: 0 }}>
+            La référence MoM correspond à une mise en service en cours de mois.
+            La comparaison est biaisée — ce n'est probablement pas une vraie anomalie budgétaire.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
+
 // ─── SummaryCard ──────────────────────────────────────────────────────────────
 function SummaryCard({ label, value, icon: Icon, color, subtitle }) {
   return (
@@ -364,9 +531,25 @@ function SummaryCard({ label, value, icon: Icon, color, subtitle }) {
 }
 
 // ─── MoM mini-badge ───────────────────────────────────────────────────────────
-function MomBadge({ variation, diff }) {
-  if (variation == null) return <Minus size={11} color={T.muted} />;
-  const isUp  = variation > 0;
+function MomBadge({ variation, diff, dataGap, observed, expected }) {
+  if (dataGap) return (
+    <span style={{ fontSize: 10, color: T.amber, fontStyle: 'italic' }}>⚠️ vide</span>
+  );
+  // Diff € = priorité sur variation %
+  const diffEur = diff != null
+    ? diff
+    : (observed != null && expected != null ? observed - expected : null);
+
+  if (diffEur == null && variation == null) return <Minus size={11} color={T.muted} />;
+
+  // Variation négligeable → stable
+  const absDiff = Math.abs(diffEur ?? 0);
+  const absPct  = Math.abs(variation ?? 0);
+  if (absDiff < 2 && absPct < 5) return (
+    <span style={{ fontSize: 10, color: T.muted, fontStyle: 'italic' }}>stable</span>
+  );
+
+  const isUp  = (diffEur ?? variation ?? 0) > 0;
   const color = isUp ? T.red : T.green;
   const bg    = isUp ? T.redBg : T.greenBg;
   const Icon  = isUp ? TrendingUp : TrendingDown;
@@ -374,9 +557,8 @@ function MomBadge({ variation, diff }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 8px', borderRadius: 99, fontSize: 11, fontWeight: 800, background: bg, color, border: `1px solid ${color}33` }}>
-        <Icon size={9} /> {sign}{variation.toFixed(1)}%
+        <Icon size={9} /> {sign}{(diffEur ?? 0).toFixed(2)} €
       </span>
-      {diff != null && <span style={{ fontSize: 10, color, fontWeight: 600 }}>{sign}{diff.toFixed(2)}€</span>}
     </div>
   );
 }
@@ -384,16 +566,17 @@ function MomBadge({ variation, diff }) {
 // ─── AnomalyRow ───────────────────────────────────────────────────────────────
 function AnomalyRow({ anomaly, onDelete }) {
   const [expanded, setExpanded] = useState(false);
-  const sev     = SEV[anomaly.severity] || SEV.low;
-  const SIcon   = sev.icon;
-  const sl      = scoreLevel(anomaly.anomaly_score);
-  const refCode = resolveRef(anomaly);
+  const sev       = SEV[anomaly.severity] || SEV.low;
+  const SIcon     = sev.icon;
+  const sl        = scoreLevel(anomaly.anomaly_score);
+  const refCode   = resolveRef(anomaly);
   const { isIF, isMom } = anomalySignals(anomaly);
-  const parsed  = parseDesc(anomaly.description);
-  const tt      = anomaly.threshold_type ?? '';
+  const parsed    = parseDesc(anomaly.description);
+  const tt        = anomaly.threshold_type ?? '';
   const momFromTt = parseMomFromThreshold(tt);
-  const momVar  = parsed.momVariation ?? momFromTt?.variation;
-  const momDiff = parsed.momDiff      ?? momFromTt?.diff;
+  const momVar    = parsed.momVariation ?? momFromTt?.variation;
+  const momDiff   = parsed.momDiff      ?? momFromTt?.diff;
+  const dataGap   = isDataGap(anomaly);
 
   return (
     <>
@@ -429,8 +612,9 @@ function AnomalyRow({ anomaly, onDelete }) {
             </div>
           )}
           <div style={{ display: 'flex', gap: 4, marginTop: 5, flexWrap: 'wrap' }}>
-            {isIF  && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: T.tealBg,   color: T.teal,   border: '1px solid #5eead4' }}>🤖 IF</span>}
-            {isMom && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: T.orangeBg, color: T.orange, border: `1px solid ${T.orange}44` }}>📅 MoM</span>}
+            {isIF    && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: T.tealBg,   color: T.teal,   border: '1px solid #5eead4' }}>🤖 IF</span>}
+            {isMom   && !dataGap && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: T.orangeBg, color: T.orange, border: `1px solid ${T.orange}44` }}>📅 MoM</span>}
+            {dataGap && <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: T.amberBg,  color: T.amber,  border: `1px solid ${T.amber}44` }}>⚠️ vide</span>}
           </div>
         </td>
 
@@ -446,9 +630,9 @@ function AnomalyRow({ anomaly, onDelete }) {
           </div>
         </td>
 
-        {/* Δ MoM */}
+        {/* Δ MoM — FIX 2 : badge neutre si data gap */}
         <td style={{ padding: '14px 12px', textAlign: 'right', minWidth: 100 }}>
-          <MomBadge variation={momVar} diff={momDiff} />
+          <MomBadge variation={momVar} diff={momDiff} dataGap={dataGap} observed={anomaly.observed_value} expected={anomaly.expected_value} />
         </td>
 
         {/* Score IF */}
@@ -469,8 +653,8 @@ function AnomalyRow({ anomaly, onDelete }) {
         {/* Méthode */}
         <td style={{ padding: '14px 14px' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-            {isIF  && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 9px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: T.tealBg,   color: T.teal,   border: '1px solid #5eead4'         }}><Brain    size={9} /> Isolation Forest</span>}
-            {isMom && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 9px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: T.orangeBg, color: T.orange, border: `1px solid ${T.orange}44`     }}><Calendar size={9} /> MoM Temporal</span>}
+            {isIF  && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 9px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: T.tealBg,   color: T.teal,   border: '1px solid #5eead4'     }}><Brain    size={9} /> Isolation Forest</span>}
+            {isMom && !dataGap && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 9px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: T.orangeBg, color: T.orange, border: `1px solid ${T.orange}44` }}><Calendar size={9} /> MoM Temporal</span>}
           </div>
         </td>
 
@@ -555,9 +739,7 @@ export default function Anomalies() {
   const [search,       setSearch]      = useState('');
   const [sortByScore,  setSortByScore] = useState(false);
   const [lastMLRun,    setLastMLRun]   = useState(null);
-
-  // ── NOUVEAU : mode MoM — 'service' (par service_name) ou 'ref' (par ref serveur exacte)
-  const [momGroupBy, setMomGroupBy] = useState('service');
+  const [momGroupBy,   setMomGroupBy]  = useState('service');
 
   const mlStep = useDetectionTicker(detectingML);
 
@@ -569,7 +751,7 @@ export default function Anomalies() {
         api.get('/anomalies/summary'),
       ]);
       const costOnly = (Array.isArray(anomRes.data) ? anomRes.data : [])
-        .filter(a => a.entity_type === 'cost_service' || a.anomaly_type === 'cost_spike');
+        .filter(a => a.entity_type === 'cost_service' || a.entity_type === 'cost_ref' || a.anomaly_type === 'cost_spike');
       setAnomalies(costOnly);
       setSummary(sumRes.data);
     } catch {
@@ -585,17 +767,13 @@ export default function Anomalies() {
     setDetecting(true);
     setDetectingML(true);
     try {
-      // Passe mom_groupby à l'API pour choisir le mode MoM
       const res   = await api.post('/anomalies/detect/ml', {
         save:        true,
-        mom_groupby: momGroupBy,   // 'service' ou 'ref'
+        mom_groupby: momGroupBy,
       });
       const count = Array.isArray(res.data) ? res.data.length : 0;
       setLastMLRun(new Date());
-      const modeLabel = momGroupBy === 'ref'
-        ? 'MoM par référence serveur'
-        : 'MoM par service';
-      toast.success(`${count} anomalie(s) de coût détectée(s) (IF + ${modeLabel})`);
+      toast.success(`${count} anomalie(s) détectée(s) (IF + MoM ${momGroupBy})`);
       await loadData();
     } catch (err) {
       toast.error(err?.response?.data?.detail || 'Erreur détection ML');
@@ -630,14 +808,12 @@ export default function Anomalies() {
   const filtered = useMemo(() => {
     let list = anomalies.filter(a => {
       if (sevFilter !== 'all' && a.severity !== sevFilter) return false;
-
       if (signalFilter !== 'all') {
         const { isIF, isMom } = anomalySignals(a);
-        if (signalFilter === 'if'   && !isIF)          return false;
-        if (signalFilter === 'mom'  && !isMom)         return false;
+        if (signalFilter === 'if'   && !isIF)            return false;
+        if (signalFilter === 'mom'  && !isMom)           return false;
         if (signalFilter === 'both' && !(isIF && isMom)) return false;
       }
-
       if (search.trim()) {
         const q   = search.toLowerCase();
         const ref = resolveRef(a) ?? '';
@@ -649,7 +825,6 @@ export default function Anomalies() {
       }
       return true;
     });
-
     if (sortByScore) {
       list = [...list].sort((a, b) => {
         if (a.anomaly_score == null && b.anomaly_score == null) return 0;
@@ -661,18 +836,15 @@ export default function Anomalies() {
     return list;
   }, [anomalies, sevFilter, signalFilter, search, sortByScore]);
 
-  const critCount      = anomalies.filter(a => a.severity === 'critical').length;
-  const highCount      = anomalies.filter(a => a.severity === 'high').length;
-  const momCount       = anomalies.filter(a => anomalySignals(a).isMom).length;
-  const ifCount        = anomalies.filter(a => anomalySignals(a).isIF).length;
-  const totalAnormal   = anomalies.reduce((sum, a) => sum + (a.observed_value ?? 0), 0);
-  const totalNormal    = anomalies.reduce((sum, a) => sum + (a.expected_value ?? 0), 0);
-  const surcouttotal   = totalAnormal - totalNormal;
+  const critCount     = anomalies.filter(a => a.severity === 'critical').length;
+  const highCount     = anomalies.filter(a => a.severity === 'high').length;
+  const momCount      = anomalies.filter(a => anomalySignals(a).isMom).length;
+  const ifCount       = anomalies.filter(a => anomalySignals(a).isIF).length;
   const surcouttotalMom = anomalies.reduce((sum, a) => {
     const { isMom } = anomalySignals(a);
-    if (!isMom) return sum;
+    if (!isMom || isDataGap(a)) return sum;
     const parsed = parseDesc(a.description);
-    const oc = parsed.overcost ?? (parsed.momDiff != null && parsed.momDiff > 0 ? parsed.momDiff : 0);
+    const oc = parsed.momDiff != null && parsed.momDiff > 0 ? parsed.momDiff : 0;
     return sum + oc;
   }, 0);
 
@@ -690,7 +862,7 @@ export default function Anomalies() {
               <h1 style={{ fontSize: 26, fontWeight: 900, color: T.slate, letterSpacing: '-0.5px', margin: 0 }}>Détection d'Anomalies Budgétaires</h1>
               <p style={{ fontSize: 13, color: T.muted, margin: '3px 0 0', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 <Brain size={11} color={T.teal} />
-                Isolation Forest ML · Peer Comparison · Month-over-Month · FinOps v6
+                Isolation Forest ML · Month-over-Month · FinOps v8
               </p>
             </div>
           </div>
@@ -706,18 +878,11 @@ export default function Anomalies() {
 
         {/* Summary cards */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 24 }}>
-          <SummaryCard label="Anomalies détectées"    value={anomalies.length}  icon={AlertTriangle} color={T.muted}   subtitle="Coûts uniquement" />
-          <SummaryCard label="Critique"               value={critCount}         icon={AlertCircle}   color={T.red}     subtitle="Action requise" />
-          <SummaryCard label="Élevée"                 value={highCount}         icon={AlertTriangle} color={T.orange}  subtitle="À surveiller" />
-          <SummaryCard label="Détection IF"           value={ifCount}           icon={Brain}         color={T.teal}    subtitle="Isolation Forest" />
-          <SummaryCard label="Détection MoM"          value={momCount}          icon={Calendar}      color={T.orange}  subtitle="Month-over-Month" />
-          <SummaryCard
-            label="Surcoût vs norme pairs"
-            value={surcouttotal > 0 ? `+${surcouttotal.toFixed(0)} €` : '—'}
-            icon={DollarSign}
-            color={surcouttotal > 0 ? T.red : T.green}
-            subtitle="vs coût normal inter-services"
-          />
+          <SummaryCard label="Anomalies détectées"  value={anomalies.length} icon={AlertTriangle} color={T.muted}   subtitle="Coûts uniquement" />
+          <SummaryCard label="Critique"              value={critCount}        icon={AlertCircle}   color={T.red}     subtitle="Action requise" />
+          <SummaryCard label="Élevée"                value={highCount}        icon={AlertTriangle} color={T.orange}  subtitle="À surveiller" />
+          <SummaryCard label="Détection IF"          value={ifCount}          icon={Brain}         color={T.teal}    subtitle="Isolation Forest" />
+          <SummaryCard label="Détection MoM"         value={momCount}         icon={Calendar}      color={T.orange}  subtitle="Month-over-Month" />
           <SummaryCard
             label="Surcoût vs mois dernier"
             value={surcouttotalMom > 0 ? `+${surcouttotalMom.toFixed(0)} €` : '—'}
@@ -733,7 +898,7 @@ export default function Anomalies() {
             <Zap size={15} color={T.teal} /> Lancer la détection d'anomalies budgétaires
           </h2>
 
-          {/* ── NOUVEAU : Sélecteur de catégorie MoM ─────────────────────── */}
+          {/* Sélecteur mode MoM */}
           <div style={{ marginBottom: 16, padding: '14px 16px', background: T.bg, borderRadius: 10, border: `1px solid ${T.border}` }}>
             <p style={{ fontSize: 11, fontWeight: 800, color: T.slate, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
               <Server size={12} color={T.teal} />
@@ -742,15 +907,7 @@ export default function Anomalies() {
             <div style={{ display: 'flex', gap: 10 }}>
               <button
                 onClick={() => setMomGroupBy('service')}
-                style={{
-                  padding: '10px 18px', borderRadius: 9,
-                  background: momGroupBy === 'service' ? T.tealBg : 'white',
-                  border: `2px solid ${momGroupBy === 'service' ? T.teal : T.border}`,
-                  color: momGroupBy === 'service' ? T.teal : T.muted,
-                  fontWeight: 700, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
-                  display: 'flex', alignItems: 'center', gap: 7,
-                  transition: 'all .15s',
-                }}
+                style={{ padding: '10px 18px', borderRadius: 9, background: momGroupBy === 'service' ? T.tealBg : 'white', border: `2px solid ${momGroupBy === 'service' ? T.teal : T.border}`, color: momGroupBy === 'service' ? T.teal : T.muted, fontWeight: 700, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 7, transition: 'all .15s' }}
               >
                 <DollarSign size={13} />
                 Par service (nom global)
@@ -758,15 +915,7 @@ export default function Anomalies() {
               </button>
               <button
                 onClick={() => setMomGroupBy('ref')}
-                style={{
-                  padding: '10px 18px', borderRadius: 9,
-                  background: momGroupBy === 'ref' ? T.purpleBg : 'white',
-                  border: `2px solid ${momGroupBy === 'ref' ? T.purple : T.border}`,
-                  color: momGroupBy === 'ref' ? T.purple : T.muted,
-                  fontWeight: 700, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
-                  display: 'flex', alignItems: 'center', gap: 7,
-                  transition: 'all .15s',
-                }}
+                style={{ padding: '10px 18px', borderRadius: 9, background: momGroupBy === 'ref' ? T.purpleBg : 'white', border: `2px solid ${momGroupBy === 'ref' ? T.purple : T.border}`, color: momGroupBy === 'ref' ? T.purple : T.muted, fontWeight: 700, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 7, transition: 'all .15s' }}
               >
                 <Server size={13} />
                 Par référence serveur (ns31546254.ip-… exact)
@@ -775,8 +924,8 @@ export default function Anomalies() {
             </div>
             <p style={{ fontSize: 10, color: T.muted, marginTop: 8, lineHeight: 1.5 }}>
               {momGroupBy === 'service'
-                ? '📊 Mode service : regroupe toutes les lignes d\'un même service_name. Vue agrégée — ex: total de toutes les lignes "RISE-3" sur le mois.'
-                : '🖥️ Mode référence : regroupe par référence OVH exacte (ex: ns31546254.ip-141-94-196.eu). Vue serveur précis — détecte si UN serveur spécifique a changé de coût.'
+                ? '📊 Mode service : regroupe toutes les lignes d\'un même service_name. observed et expected sont tous les deux au niveau service — même scope de comparaison.'
+                : '🖥️ Mode référence : regroupe par référence OVH exacte. observed et expected sont tous les deux pour la même ref — comparaison 1-to-1 précise.'
               }
             </p>
           </div>
@@ -785,20 +934,9 @@ export default function Anomalies() {
             <button
               onClick={runDetection}
               disabled={detecting}
-              style={{
-                padding: '13px 28px', borderRadius: 10,
-                background: detecting ? T.bg : `linear-gradient(135deg, ${T.teal}, #0d9488)`,
-                border: 'none', color: detecting ? T.muted : 'white',
-                fontWeight: 700, fontSize: 14, cursor: detecting ? 'not-allowed' : 'pointer',
-                fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 9,
-                boxShadow: detecting ? 'none' : `0 4px 14px ${T.teal}55`,
-                transition: 'all .2s',
-              }}
+              style={{ padding: '13px 28px', borderRadius: 10, background: detecting ? T.bg : `linear-gradient(135deg, ${T.teal}, #0d9488)`, border: 'none', color: detecting ? T.muted : 'white', fontWeight: 700, fontSize: 14, cursor: detecting ? 'not-allowed' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 9, boxShadow: detecting ? 'none' : `0 4px 14px ${T.teal}55`, transition: 'all .2s' }}
             >
-              {detecting
-                ? <RefreshCw size={15} style={{ animation: 'spin 1s linear infinite' }} />
-                : <Brain size={15} />
-              }
+              {detecting ? <RefreshCw size={15} style={{ animation: 'spin 1s linear infinite' }} /> : <Brain size={15} />}
               Lancer Isolation Forest ML + MoM — Coûts
               {!detecting && (
                 <span style={{ fontSize: 10, background: 'rgba(255,255,255,0.2)', borderRadius: 4, padding: '2px 7px' }}>
@@ -819,19 +957,16 @@ export default function Anomalies() {
             )}
           </div>
 
-          {/* Architecture 3 signaux */}
+          {/* Architecture signaux */}
           <div style={{ marginTop: 16, padding: '14px 16px', background: T.tealBg, borderRadius: 10, border: '1px solid #5eead4', fontSize: 11, color: '#134E4A', lineHeight: 1.8 }}>
             <Brain size={11} style={{ display: 'inline', marginRight: 6 }} />
-            <strong>Architecture 3 signaux :</strong>
+            <strong>Architecture 2 signaux :</strong>
             <div style={{ marginTop: 6, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
               <span style={{ background: T.tealBg, border: '1px solid #5eead4', borderRadius: 6, padding: '4px 10px', fontSize: 11, color: T.teal, fontWeight: 700 }}>
                 🤖 Signal 1 — Isolation Forest : outlier parmi tous les services (score &lt; -0.08)
               </span>
-              <span style={{ background: T.greenBg, border: '1px solid #6ee7b7', borderRadius: 6, padding: '4px 10px', fontSize: 11, color: T.green, fontWeight: 700 }}>
-                📊 Signal 2 — Peer Comparison : % vs moyenne inter-services (expected_value = mean de {anomalies.length > 0 ? `~${anomalies.length}` : 'N'} services)
-              </span>
               <span style={{ background: T.orangeBg, border: `1px solid ${T.orange}44`, borderRadius: 6, padding: '4px 10px', fontSize: 11, color: T.orange, fontWeight: 700 }}>
-                📅 Signal 3 — MoM : variation &gt; 50% vs mois précédent → surcoût exact
+                📅 Signal 2 — MoM Temporel : variation &gt; 50% vs mois précédent — même scope (service ou ref)
               </span>
             </div>
           </div>
@@ -880,8 +1015,8 @@ export default function Anomalies() {
                   { label: 'Sévérité',             align: 'left'  },
                   { label: 'Référence & Service',  align: 'left'  },
                   { label: 'Coût Réel & Date',     align: 'left'  },
-                  { label: 'Δ % MoM',              align: 'right', tip: 'Variation Month-over-Month' },
-                  { label: 'Score IF',              align: 'right', sortable: true },
+                  { label: 'Δ € MoM',              align: 'right', tip: 'Différence € vs mois précédent' },
+                  { label: 'Score IF',             align: 'right', sortable: true },
                   { label: 'Méthode',              align: 'left'  },
                   { label: 'Détecté le',           align: 'left'  },
                   { label: '',                     align: 'left'  },

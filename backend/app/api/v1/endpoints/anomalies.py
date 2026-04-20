@@ -179,14 +179,14 @@ def detect_ml(
     try:
         logger.info(
             f"🤖 ML detection triggered by {current_user.email} | "
-            f"contamination={req.contamination} n_est={req.n_estimators}"
-        )
+             f"contamination={req.contamination} n_est={req.n_estimators} mode={req.mom_groupby}"        )
         anomalies = detect_resource_anomalies_ml(
             db,
             server_filter=req.server_filter,
             contamination=req.contamination,
             n_estimators=req.n_estimators,
             window_days=req.window_days,
+             mom_groupby=req.mom_groupby,
             save=req.save,
         )
         logger.info(f"✅ ML detected {len(anomalies)} anomalies")

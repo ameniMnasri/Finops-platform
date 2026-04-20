@@ -481,6 +481,18 @@ def import_ovh_metrics(
             if deleted:
                 logger.info(f"  🗑️  Deleted {deleted} stale row(s) for {server_name}")
 
+            # ── Parse OVH service lifecycle dates ────────────────────────
+            def _parse_ovh_date(val) -> Optional[datetime]:
+                """Parse ISO-8601 date string from OVH API (e.g. '2023-03-15T00:00:00+01:00')."""
+                if not val:
+                    return None
+                if isinstance(val, datetime):
+                    return val
+                try:
+                    return datetime.fromisoformat(str(val))
+                except (ValueError, TypeError):
+                    return None
+
             metric_data = ResourceMetricCreate(
                 server_name=server_name,
                 server_type=raw.get("server_type"),
@@ -488,6 +500,13 @@ def import_ovh_metrics(
                 ram_usage=float(raw.get("ram_usage") or 0),
                 disk_usage=float(raw.get("disk_usage") or 0),
                 recorded_at=recorded_at,
+                # OVH service lifecycle dates — populated by cloud_fetcher via /serviceInfos
+                creation_date=_parse_ovh_date(raw.get("creation_date")),
+                expiration_date=_parse_ovh_date(
+                    raw.get("expiration_date") or raw.get("expiration")
+                ),
+                ovh_state=raw.get("ovh_state") or raw.get("state"),
+                ovh_offer=raw.get("ovh_offer") or raw.get("offer"),
             )
             resource_service.create_resource_metric(db, metric_data)
             metrics_created += 1
@@ -689,25 +708,53 @@ def get_all_servers_summary(
         if peak_cpu_raw is not None and peak_cpu_raw < 0:
             peak_cpu_raw = None   # sentinel in peak too → hide
 
+        # ── OVH service lifecycle dates stored in DB during import ──────────
+        # Wrapped in try/except: gracefully handles the case where the migration
+        # hasn't been run yet and the columns don't exist in the DB.
+        dates_row = None
+        try:
+            dates_row = (
+                db.query(
+                    ResourceMetric.creation_date,
+                    ResourceMetric.expiration_date,
+                    ResourceMetric.ovh_state,
+                    ResourceMetric.ovh_offer,
+                )
+                .filter(ResourceMetric.server_name == raw_name)
+                .filter(ResourceMetric.creation_date.isnot(None))
+                .order_by(ResourceMetric.recorded_at.desc())
+                .first()
+            )
+        except Exception as _date_err:
+            logger.debug(
+                f"Could not query lifecycle dates for {raw_name} "
+                f"(migration pending?): {_date_err}"
+            )
+
         monitoring_results[norm_name] = {
-            "server_name":   raw_name,
-            "server_type":   stype,
-            "avg_cpu":       raw_avg_cpu,
-            "avg_ram":       avg["avg_ram_usage"],
-            "avg_disk":      avg["avg_disk_usage"],
-            "total_records": avg["total_records"],
-            "peak_cpu":      peak_cpu_raw,
-            "peak_cpu_at":   peak["peak_cpu_recorded_at"],
-            "peak_ram":      peak["peak_ram_usage"],
-            "peak_ram_at":   peak["peak_ram_recorded_at"],
-            "peak_disk":     peak["peak_disk_usage"],
-            "peak_disk_at":  peak["peak_disk_recorded_at"],
+            "server_name":    raw_name,
+            "server_type":    stype,
+            "avg_cpu":        raw_avg_cpu,
+            "avg_ram":        avg["avg_ram_usage"],
+            "avg_disk":       avg["avg_disk_usage"],
+            "total_records":  avg["total_records"],
+            "peak_cpu":       peak_cpu_raw,
+            "peak_cpu_at":    peak["peak_cpu_recorded_at"],
+            "peak_ram":       peak["peak_ram_usage"],
+            "peak_ram_at":    peak["peak_ram_recorded_at"],
+            "peak_disk":      peak["peak_disk_usage"],
+            "peak_disk_at":   peak["peak_disk_recorded_at"],
             # CPU hw specs (from /specifications/hardware, stored as negative sentinel)
-            "cpu_cores":     cpu_cores_hw,
-            "cpu_source":    cpu_source_val,
+            "cpu_cores":      cpu_cores_hw,
+            "cpu_source":     cpu_source_val,
             # Sources will be set below after invoice enrichment
-            "ram_source":    "none",
-            "disk_source":   "none",
+            "ram_source":     "none",
+            "disk_source":    "none",
+            # ── OVH lifecycle dates (real dates from /serviceInfos) ──────────
+            "creation_date":   dates_row.creation_date   if dates_row else None,
+            "expiration_date": dates_row.expiration_date if dates_row else None,
+            "ovh_state":       dates_row.ovh_state       if dates_row else None,
+            "ovh_offer":       dates_row.ovh_offer       if dates_row else None,
         }
 
     # ── 2. Build invoice-based specs (from CostRecord) ────────────────────

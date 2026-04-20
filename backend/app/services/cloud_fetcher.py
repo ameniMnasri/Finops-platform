@@ -488,6 +488,23 @@ class OVHResourceFetcher(BaseFetcher):
                     "disk_usage":  round(disk_total_gb, 3),   # hardware capacity (not live usage)
                     "recorded_at": now.isoformat(),
                 }
+
+                # ── Fetch lifecycle dates from /serviceInfos (non-blocking) ──
+                svc = self._fetch_service_infos(
+                    f"/vps/{vps_name}/serviceInfos",
+                    app_key, app_secret, consumer_key,
+                )
+                if svc:
+                    metric["creation_date"]   = svc.get("creation")
+                    metric["expiration_date"] = svc.get("expiration")
+                    metric["ovh_state"]       = svc.get("status") or vps_state
+                    metric["ovh_offer"]       = vps_info.get("offer") or vps_info.get("currentRange")
+                    logger.info(
+                        f"  [svcInfo] created={svc.get('creation','?')[:10]} "
+                        f"expires={svc.get('expiration','?')[:10]}"
+                    )
+                else:
+                    metric["ovh_state"] = vps_state
                 metrics.append(metric)
                 logger.info(
                     f"✅ VPS {vps_name}: CPU=N/A "
@@ -668,6 +685,21 @@ class OVHResourceFetcher(BaseFetcher):
                     "disk_usage":   round(disk_usage_gb, 3),
                     "recorded_at":  now.isoformat(),
                 }
+
+                # ── Fetch lifecycle dates from /serviceInfos (non-blocking) ──
+                svc = self._fetch_service_infos(
+                    f"/dedicated/server/{server_name}/serviceInfos",
+                    app_key, app_secret, consumer_key,
+                )
+                if svc:
+                    metric["creation_date"]   = svc.get("creation")
+                    metric["expiration_date"] = svc.get("expiration")
+                    metric["ovh_state"]       = svc.get("status")
+                    metric["ovh_offer"]       = svc.get("serviceLevel") or proc_name or None
+                    logger.info(
+                        f"  [svcInfo] created={svc.get('creation','?')[:10]} "
+                        f"expires={svc.get('expiration','?')[:10]}"
+                    )
                 metrics.append(metric)
                 logger.info(
                     f"  => CPU={'%.1f%%' % cpu_usage if rtm_ok else ('%dc hw-spec' % cpu_cores_hw if cpu_cores_hw else 'N/A')} "
@@ -691,6 +723,30 @@ class OVHResourceFetcher(BaseFetcher):
             logger.warning("⚠️ No metrics were collected - this could indicate permission issues or no servers")
         
         return metrics
+
+    # ── Service lifecycle helpers (creation / expiration dates) ──
+
+    def _fetch_service_infos(
+        self,
+        path: str,          # e.g. "/vps/vps123.ovh.net/serviceInfos"
+        app_key: str,
+        app_secret: str,
+        consumer_key: str,
+    ) -> Dict:
+        """
+        GET {path}/serviceInfos
+        Returns OVH service lifecycle info:
+          { "creation": "2023-03-15T00:00:00+01:00",
+            "expiration": "2026-04-15T00:00:00+02:00",
+            "status": "ok", ... }
+        Returns {} on any error (non-blocking).
+        """
+        try:
+            data = self._request("GET", path, app_key, app_secret, consumer_key)
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.debug(f"  [serviceInfos] {path} → skipped ({e})")
+            return {}
 
     # ── VPS helpers ───────────────────────────────────────────────
 

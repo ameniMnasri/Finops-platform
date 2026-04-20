@@ -22,6 +22,11 @@ class ResourceService:
             server_name=data.server_name,
             server_type=getattr(data, "server_type", None),  # "VPS" | "DEDICATED" | None
             recorded_at=data.recorded_at or datetime.utcnow(),
+            # ── NEW: OVH service lifecycle dates ──────────────────────────────
+            creation_date=getattr(data, "creation_date", None),
+            expiration_date=getattr(data, "expiration_date", None),
+            ovh_state=getattr(data, "ovh_state", None),
+            ovh_offer=getattr(data, "ovh_offer", None),
         )
         db.add(metric)
         db.commit()
@@ -122,6 +127,35 @@ class ResourceService:
             "peak_disk_usage": peak_disk_record.disk_usage if peak_disk_record else 0.0,
             "peak_disk_server": peak_disk_record.server_name if peak_disk_record else None,
             "peak_disk_recorded_at": peak_disk_record.recorded_at if peak_disk_record else None,
+        }
+
+    # ── NEW: fetch lifecycle dates for a single server ──────────────────────
+    def get_server_dates(self, db: Session, server_name: str) -> dict:
+        """
+        Return the OVH lifecycle dates stored on the most recent ResourceMetric row
+        for this server (creation_date, expiration_date, ovh_state, ovh_offer).
+        """
+        row = (
+            db.query(ResourceMetric)
+            .filter(ResourceMetric.server_name == server_name)
+            .filter(ResourceMetric.creation_date.isnot(None))
+            .order_by(ResourceMetric.recorded_at.desc())
+            .first()
+        )
+        if not row:
+            return {
+                "server_name":     server_name,
+                "creation_date":   None,
+                "expiration_date": None,
+                "ovh_state":       None,
+                "ovh_offer":       None,
+            }
+        return {
+            "server_name":     server_name,
+            "creation_date":   row.creation_date,
+            "expiration_date": row.expiration_date,
+            "ovh_state":       row.ovh_state,
+            "ovh_offer":       row.ovh_offer,
         }
 
 
