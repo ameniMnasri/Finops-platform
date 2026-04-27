@@ -48,3 +48,5 @@ flake8==6.1.0
 bandit==1.7.5
 email-validator==2.1.0
 argon2-cffi==23.1.0
+
+psycopg2-binary==2.9.9
