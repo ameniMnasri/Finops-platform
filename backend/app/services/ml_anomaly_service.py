@@ -1,5 +1,5 @@
 """
-ml_anomaly_service.py — Détection ML FinOps v9
+ml_anomaly_service.py — Détection ML FinOps v10
 ═══════════════════════════════════════════════════════════════════════════════
 
 DIAGNOSTIC — Pourquoi les anomalies affichent 0.00€ partout (image 1) :
@@ -34,7 +34,25 @@ DIAGNOSTIC — Pourquoi les anomalies affichent 0.00€ partout (image 1) :
     Toujours documenté, pas corrigé (comportement voulu pour avoir
     les données à jour). Limitation : le mois en cours est partiel.
 
-ARCHITECTURE v9 :
+  BUG E — Prorata résiduel échappant à la correction M-2 (v10)
+    Quand une ref n'a aucune donnée M-2 (premier mois de facturation = M-1
+    prorata), _apply_prorata_fallback ne peut pas substituer M-2 comme
+    référence. IF voit alors un MoM >100% structurel, non anomalique.
+    FIX : garde heuristique secondaire dans _run_if() :
+    mom>100% + prev/cur<0.5 + volatility<0.3 → exclusion de la population IF.
+
+  BUG F — Volatilité gonflée par les lignes de facturation intra-mois (v10)
+    OVHcloud (et d'autres providers) peut émettre plusieurs lignes CostRecord
+    pour le même service sur le même mois. _enrich_time_series() accumulait
+    chaque ligne comme un point temporel distinct, gonflant artificiellement
+    la volatilité de services parfaitement stables.
+    Conséquence : IF attribuait des scores de -0.71 à des services avec
+    diff=0.37€, consommant le budget contamination et dégradant la qualité
+    du signal.
+    FIX : bucketing mensuel — somme de toutes les lignes du même YYYY-MM
+    avant calcul de volatilité et tendance. Un point par mois par entité.
+
+ARCHITECTURE v10 :
   1. MoM mensuel strict (même scope garanti)
   2. Séparation : actifs (current>0) / disparus / nouveaux
   3. IF sur actifs uniquement
@@ -48,6 +66,7 @@ import logging
 import statistics as _s
 from datetime import datetime, timedelta, timezone, date
 from calendar import monthrange
+from collections import defaultdict
 from typing import List, Optional, Dict, Tuple
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -93,7 +112,7 @@ MIN_COVERAGE_PCT        = 20.0    # % minimum d'entités courantes vs précéden
 # Évite les faux positifs quand seulement 1-2 lignes sont déjà facturées.
 MIN_CURRENT_ENTITIES    = 3
 
-_MAX_ENTITY_NAME        = 60
+_MAX_ENTITY_NAME        = 120   # FIX: was 60 — prorata dates like "(01/04/2026-16/04/2026)" need up to 100 chars
 _MAX_THRESHOLD_TYP      = 60
 
 
@@ -472,8 +491,8 @@ def _enrich_time_series(
     group_col,
 ) -> None:
     """Ajoute volatility, trend, last_date à chaque entité. N'affecte pas observed/expected."""
-    series:    Dict[str, List[float]] = {}
-    last_date: Dict[str, date]        = {}
+    monthly:   Dict[str, Dict[str, float]] = defaultdict(dict)
+    last_date: Dict[str, date]             = {}
 
     for row in db.query(
         group_col, CostRecord.amount, CostRecord.cost_date,
@@ -483,13 +502,15 @@ def _enrich_time_series(
         k = str(row[0]).strip() if row[0] else None
         if not k or k not in entities:
             continue
-        series.setdefault(k, []).append(_r(float(row[1])))
-        d = row[2] if isinstance(row[2], date) else row[2].date()
+        d  = row[2] if isinstance(row[2], date) else row[2].date()
+        ym = f"{d.year}-{d.month:02d}"
+        monthly[k][ym] = monthly[k].get(ym, 0.0) + _r(float(row[1]))
         if k not in last_date or d > last_date[k]:
             last_date[k] = d
 
     for key, meta in entities.items():
-        s = series.get(key, [meta["current_cost"]])
+        month_vals = monthly.get(key, {})
+        s = [v for _, v in sorted(month_vals.items())] if month_vals else [meta["current_cost"]]
         meta["last_date"] = last_date.get(key)
         if len(s) >= 2:
             mean_s = _s.mean(s) or 0.01
@@ -543,6 +564,33 @@ def _run_if(entities: Dict[str, dict], n_estimators: int) -> Dict[str, float]:
             "  ⏭️  [IF SKIP no-history] %d service(s) exclus (previous < %.1f€) : %s",
             len(skipped_no_history), IF_MIN_PREVIOUS_EUR,
             ", ".join(skipped_no_history[:5]),
+        )
+
+    skipped_prorata = [k for k in list(active) if "prorata" in k.lower()]
+    for k in skipped_prorata:
+        del active[k]
+    if skipped_prorata:
+        logger.info(
+            "  ⏭️ [IF SKIP prorata] %d service(s) exclus : %s",
+            len(skipped_prorata),
+            ", ".join(skipped_prorata),
+        )
+
+    skipped_residual_prorata = []
+    for k in list(active):
+        v   = active[k]
+        pct = v.get("variation_pct") or 0.0
+        cur = v["current_cost"]
+        prv = v["previous_cost"]
+        if pct > 100 and prv > 0 and (prv / cur) < 0.5 and v.get("volatility", 1.0) < 0.3:
+            skipped_residual_prorata.append(k)
+            del active[k]
+    if skipped_residual_prorata:
+        logger.info(
+            "  ⏭️ [IF SKIP residual-prorata] %d exclus "
+            "(mom>100%% + prev/cur<0.5 + vol<0.3): %s",
+            len(skipped_residual_prorata),
+            ", ".join(skipped_residual_prorata),
         )
 
     if len(active) < MIN_ENTITIES_FOR_IF:
@@ -715,14 +763,19 @@ def _mom_anomaly(
         + (f"{sign}{pct:.2f}% ({sign}{diff:.2f}€) | " if pct is not None else "NOUVEAU | ")
         + f"prev={prv:.2f}€ → cur={cur:.2f}€"
     )
-    tt = _trunc(f"mom_{groupby}>{MOM_SPIKE_THRESHOLD:.0f}%", _MAX_THRESHOLD_TYP)
+    if kind == "NEW":
+        tt = _trunc(f"mom_{groupby}_new_cost", _MAX_THRESHOLD_TYP)
+    elif kind == "DROP":
+        tt = _trunc(f"mom_{groupby}_cost_drop", _MAX_THRESHOLD_TYP)
+    else:
+        tt = _trunc(f"mom_{groupby}>{MOM_SPIKE_THRESHOLD:.0f}%", _MAX_THRESHOLD_TYP)
 
     return Anomaly(
         entity_type      = "cost_ref" if groupby == "ref" else "cost_service",
         entity_name      = _trunc(key, _MAX_ENTITY_NAME),
         anomaly_type     = AnomalyType.COST_SPIKE,
         severity         = sev,
-        method           = AnomalyMethod.ISOLATION_FOREST,
+        method           = AnomalyMethod.MOM_TEMPORAL,
         observed_value   = cur,
         expected_value   = prv if prv > 0 else None,
         std_dev          = _r(abs(diff)),
@@ -759,7 +812,7 @@ def detect_cost_anomalies_ml(
     4. Sauvegarde
     """
     logger.info(
-        "\n%s\n💰 [FinOps v9] n_est=%d | win=%dj | mode=%s | filtre=%s\n%s",
+        "\n%s\n💰 [FinOps v10] n_est=%d | win=%dj | mode=%s | filtre=%s\n%s",
         "=" * 90, n_estimators, window_days, mom_groupby,
         service_filter or "—", "=" * 90,
     )
@@ -841,18 +894,58 @@ def detect_cost_anomalies_ml(
             seen.add(key)
             logger.info("  🆕 [NEW] %s | %.2f€", key, mom["current_cost"])
 
-    # ── 6. Sauvegarde ─────────────────────────────────────────────────────
-    if save and detected:
-        db.add_all(detected)
-        db.commit()
-        for a in detected:
-            db.refresh(a)
+    new_only  = detected
+    n_skipped = 0
 
-    n_if  = sum(1 for a in detected if a.anomaly_score is not None)
-    n_mom = len(detected) - n_if
+    # ── 6. Sauvegarde (idempotente) ───────────────────────────────────────
+    if save and detected:
+        window_start = datetime.now(timezone.utc).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0,
+        )
+        existing = db.query(
+            Anomaly.entity_name,
+            Anomaly.method,
+        ).filter(
+            Anomaly.detected_at >= window_start,
+        ).all()
+
+        existing_keys = {
+            (row.entity_name, row.method)
+            for row in existing
+        }
+
+        new_only = [
+            a for a in detected
+            if (
+                _trunc(a.entity_name or "", _MAX_ENTITY_NAME),
+                a.method,
+            ) not in existing_keys
+        ]
+
+        n_skipped = len(detected) - len(new_only)
+        if n_skipped:
+            logger.info(
+                "  ⏭️  [DEDUP] %d anomalie(s) déjà présente(s) ce mois — ignorée(s)",
+                n_skipped,
+            )
+
+        if new_only:
+            db.add_all(new_only)
+            db.commit()
+            for a in new_only:
+                db.refresh(a)
+            logger.info("  💾 [SAVE] %d anomalie(s) sauvegardée(s)", len(new_only))
+        else:
+            logger.info("  💾 [SAVE] Aucune nouvelle anomalie à sauvegarder")
+
+    saved  = new_only if save else detected
+    n_if   = sum(1 for a in saved if a.anomaly_score is not None)
+    n_mom  = len(saved) - n_if
     logger.info(
-        "\n%s\n✅ %d anomalies (IF=%d, MoM=%d) | mode=%s\n%s\n",
-        "=" * 90, len(detected), n_if, n_mom, mom_groupby, "=" * 90,
+        "\n%s\n✅ %d anomalies détectées → %d sauvegardées (IF=%d, MoM=%d) "
+        "| %d dédupliquées | mode=%s\n%s\n",
+        "=" * 90, len(detected), len(saved), n_if, n_mom,
+        n_skipped if save else 0, mom_groupby, "=" * 90,
     )
     return detected
 

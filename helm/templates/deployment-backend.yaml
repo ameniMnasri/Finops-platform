@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: backend
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      # ── Wait until PostgreSQL is ready before starting the app ────────────
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.postgres.image }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for postgres-service.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.postgres.port }}..."
+              until pg_isready \
+                -h postgres-service.{{ .Values.namespace }}.svc.cluster.local \
+                -p {{ .Values.postgres.port }} \
+                -U {{ .Values.postgres.user }}; do
+                echo "  postgres not ready — retrying in 3s"
+                sleep 3
+              done
+              echo "postgres is ready."
+
+      containers:
+        - name: backend
+          image: {{ .Values.backend.image }}:{{ .Values.backend.tag }}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: {{ .Values.backend.port }}
+              name: http
+
+          # All secrets injected via secretRef — no hardcoded values
+          envFrom:
+            - secretRef:
+                name: finops-secrets
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 10
+            periodSeconds:       10
+            timeoutSeconds:       5
+            failureThreshold:     3
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 30
+            periodSeconds:       15
+            timeoutSeconds:       5
+            failureThreshold:     3
+
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}

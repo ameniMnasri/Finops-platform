@@ -1088,7 +1088,6 @@ function Insights({ servers }) {
       {/* FinOps KPIs */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14 }}>
         <div style={{ background: 'white', borderRadius: 16, border: `1px solid ${T.border}`, padding: '18px 22px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
-          <div style={{ fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>💸 Coût mensuel total</div>
           <div style={{ fontSize: 28, fontWeight: 900, color: T.slate }}>{fmtEuro(totalCost)} <span style={{ fontSize: 14, fontWeight: 600, color: T.muted }}>€</span></div>
           <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>{withCost.length} serveurs avec coût</div>
         </div>
@@ -1351,7 +1350,6 @@ export default function ResourceDashboard() {
               <SummaryCard label="Serveurs" value={filteredServers.length} sub={`${filteredServers.filter(s => s.type === 'VPS').length} VPS · ${filteredServers.filter(s => s.type === 'Dedicated').length} Dédiés`} accentColor={T.green} bgColor={T.greenBg} icon={Server} />
               <SummaryCard label="Disk Moyen" value={summary.avgDisk.toFixed(1)} sub="GB" accentColor={T.blue} bgColor={T.blueBg} icon={HardDrive} />
               <SummaryCard label="RAM Moyen" value={summary.avgRam.toFixed(1)} sub="GB" accentColor={T.purple} bgColor={T.purpleBg} icon={Activity} />
-              <SummaryCard label="Coût mensuel" value={summary.totalMonthlyCost > 0 ? fmtEuro(summary.totalMonthlyCost) : '—'} sub={summary.totalMonthlyCost > 0 ? `€ · ${summary.serversWithCost} serveurs` : 'Aucune donnée'} accentColor="#059669" bgColor="#D1FAE5" icon={DollarSign} />
               <SummaryCard label="À optimiser" value={summary.underutilized} sub={`${summary.underutilized} downsize · ${summary.critical} upsize`} accentColor={T.amber} bgColor={T.amberBg} icon={AlertTriangle} />
               {renewalSoonCount > 0 && (
                 <SummaryCard label="Renouvellement < 30j" value={renewalSoonCount} sub="serveurs à renouveler" accentColor={renewalSoonCount > 0 ? T.red : T.green} bgColor={renewalSoonCount > 0 ? T.redBg : T.greenBg} icon={Clock} />

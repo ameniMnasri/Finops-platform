@@ -1,0 +1,14 @@
+apiVersion: v2
+name: finops-platform
+description: FinOps Platform — ML anomaly detection and cloud cost management
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - finops
+  - anomaly-detection
+  - cost-management
+  - fastapi
+  - react
+maintainers:
+  - name: FinOps Team

@@ -868,8 +868,124 @@ def get_all_servers_summary(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# RENEWALS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/renewals",
+    response_model=list,
+    summary="Upcoming server renewals",
+    description=(
+        "Returns servers whose OVH expiration_date falls within the next "
+        "`horizon` days, enriched with monthly cost from the previous billing "
+        "month and a prorata estimate. Sorted by days_until_renewal ASC."
+    ),
+)
+def get_renewals(
+    horizon: int = Query(90, ge=1, le=730, description="Days ahead to look for renewals"),
+    db: Session = Depends(get_db),
+):
+    from datetime import timezone, timedelta
+
+    today_dt   = datetime.now(timezone.utc)
+    today_date = today_dt.date()
+    cutoff_dt  = today_dt + timedelta(days=horizon)
+
+    # ── Latest metric row per server that has an expiration_date ─────────
+    subq = (
+        db.query(
+            ResourceMetric.server_name,
+            func.max(ResourceMetric.recorded_at).label("max_rec"),
+        )
+        .filter(ResourceMetric.expiration_date.isnot(None))
+        .group_by(ResourceMetric.server_name)
+        .subquery()
+    )
+    rows = (
+        db.query(ResourceMetric)
+        .join(subq, and_(
+            ResourceMetric.server_name == subq.c.server_name,
+            ResourceMetric.recorded_at == subq.c.max_rec,
+        ))
+        .filter(
+            ResourceMetric.expiration_date >= today_dt,
+            ResourceMetric.expiration_date <= cutoff_dt,
+        )
+        .order_by(ResourceMetric.expiration_date.asc())
+        .all()
+    )
+
+    # ── Monthly cost from previous full month ─────────────────────────────
+    cur_start  = today_date.replace(day=1)
+    prev_year  = cur_start.year  if cur_start.month > 1 else cur_start.year - 1
+    prev_month = cur_start.month - 1 if cur_start.month > 1 else 12
+    prev_start = date(prev_year, prev_month, 1)
+    prev_end   = date(prev_year, prev_month, monthrange(prev_year, prev_month)[1])
+
+    cost_rows = (
+        db.query(CostRecord.reference, func.sum(CostRecord.amount).label("total"))
+        .filter(
+            CostRecord.reference.isnot(None),
+            CostRecord.cost_date >= prev_start,
+            CostRecord.cost_date <= prev_end,
+        )
+        .group_by(CostRecord.reference)
+        .all()
+    )
+
+    cost_map_norm:  Dict[str, float] = {}
+    cost_map_fuzzy: Dict[str, float] = {}
+    for cr in cost_rows:
+        norm = _normalize_server_name(str(cr.reference))
+        val  = float(cr.total or 0)
+        cost_map_norm[norm] = val
+        fkey = _fuzzy_server_key(norm)
+        if fkey:
+            cost_map_fuzzy[fkey] = val
+
+    days_in_month = monthrange(today_date.year, today_date.month)[1]
+
+    result = []
+    for row in rows:
+        exp = row.expiration_date
+        if exp is None:
+            continue
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+
+        exp_date  = exp.date()
+        days_left = (exp_date - today_date).days
+
+        norm_name = _normalize_server_name(row.server_name or "")
+        price = cost_map_norm.get(norm_name) or cost_map_fuzzy.get(_fuzzy_server_key(norm_name))
+
+        prorata = (
+            round(price * days_left / days_in_month, 2)
+            if price and days_left >= 0
+            else None
+        )
+
+        result.append({
+            "id":                 row.id,
+            "reference":          row.server_name,
+            "type":               row.server_type or _detect_server_type_from_name(row.server_name or ""),
+            "renewal_date":       exp_date.isoformat(),
+            "price":              round(price, 2) if price else None,
+            "days_until_renewal": days_left,
+            "prorata_amount":     prorata,
+        })
+
+    result.sort(key=lambda x: x["days_until_renewal"])
+    logger.info(
+        "📅 [RENEWALS] horizon=%dd → %d serveur(s) à renouveler | prev_month=%s→%s",
+        horizon, len(result), prev_start, prev_end,
+    )
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # /{metric_id} — INTENTIONALLY LAST so it never shadows /stats/*, /servers/*,
-#               /import-ovh-metrics, etc.
+#               /import-ovh-metrics, /renewals, etc.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get(

@@ -26,8 +26,9 @@ class AnomalySeverity(str, enum.Enum):
 
 
 class AnomalyMethod(str, enum.Enum):
-    STATISTICAL  = "statistical"   # Moving average + std dev
+    STATISTICAL      = "statistical"       # Moving average + std dev
     ISOLATION_FOREST = "isolation_forest"  # ML outlier detection
+    MOM_TEMPORAL     = "mom_temporal"      # MoM pur (SPIKE / DROP / NEW)
 
 
 class Anomaly(Base):
