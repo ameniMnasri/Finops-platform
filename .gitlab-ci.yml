@@ -6,6 +6,7 @@ stages:
 variables:
   BACKEND_IMAGE: "$CI_REGISTRY_IMAGE/backend"
   FRONTEND_IMAGE: "$CI_REGISTRY_IMAGE/frontend"
+  REPO_URL: "https://amenimnasri8:$GITLAB_TOKEN@gitlab.com/amenimnasri8/Finops-platform.git"
 
 test-backend:
   stage: test
@@ -57,7 +58,7 @@ update-helm-values:
     - sed -i "s/tag:.*/tag: $CI_COMMIT_SHA/" helm/values.yaml
     - git add helm/values.yaml
     - git diff --cached --quiet && echo no-changes || git commit -m ci-update-tags
-    - git remote set-url origin https://amenimnasri8:$GITLAB_TOKEN@gitlab.com/amenimnasri8/Finops-platform.git
+    - git remote set-url origin $REPO_URL
     - git push origin HEAD:main
   needs:
     - build-backend
