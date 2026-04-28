@@ -54,10 +54,10 @@ update-helm-values:
   script:
     - git config user.email ci@gitlab.com
     - git config user.name GitLabCI
-    - sed -i "s/tag:.*/tag: ${CI_COMMIT_SHA}/" helm/values.yaml
+    - sed -i "s/tag:.*/tag: $CI_COMMIT_SHA/" helm/values.yaml
     - git add helm/values.yaml
     - git diff --cached --quiet && echo no-changes || git commit -m ci-update-tags
-    - git remote set-url origin https://amenimnasri8:${GITLAB_TOKEN}@gitlab.com/amenimnasri8/Finops-platform.git
+    - git remote set-url origin https://amenimnasri8:$GITLAB_TOKEN@gitlab.com/amenimnasri8/Finops-platform.git
     - git push origin HEAD:main
   needs:
     - build-backend
