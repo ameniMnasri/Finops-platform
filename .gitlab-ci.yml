@@ -49,15 +49,18 @@ build-frontend:
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
 
-deploy:
+update-helm-values:
   stage: deploy
   tags:
     - wsl2-local-runner
-  before_script:
-    - export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-    - kubectl get nodes
   script:
-    - helm upgrade --install finops-platform ./helm --namespace finops --create-namespace --set backend.image="$BACKEND_IMAGE" --set backend.tag="$CI_COMMIT_SHA" --set frontend.image="$FRONTEND_IMAGE" --set frontend.tag="$CI_COMMIT_SHA" --set secrets.secretKey="$SECRET_KEY" --set secrets.jwtSecret="$JWT_SECRET" --wait --timeout 5m
+    - git config user.email "ci@gitlab.com"
+    - git config user.name "GitLab CI"
+    - sed -i "s|tag:.*# backend-tag|tag: $CI_COMMIT_SHA # backend-tag|" helm/values.yaml
+    - sed -i "s|tag:.*# frontend-tag|tag: $CI_COMMIT_SHA # frontend-tag|" helm/values.yaml
+    - git add helm/values.yaml
+    - git diff --cached --quiet && echo "No changes" || git commit -m "ci: update image tags to $CI_COMMIT_SHA [skip ci]"
+    - git push https://amenimnasri8:$GITLAB_TOKEN@gitlab.com/amenimnasri8/Finops-platform.git HEAD:main
   needs:
     - build-backend
     - build-frontend
