@@ -1,4 +1,4 @@
-stages:
+﻿stages:
   - test
   - build
   - deploy
@@ -6,7 +6,6 @@ stages:
 variables:
   BACKEND_IMAGE: "$CI_REGISTRY_IMAGE/backend"
   FRONTEND_IMAGE: "$CI_REGISTRY_IMAGE/frontend"
-  REPO_URL: "https://amenimnasri8:$GITLAB_TOKEN@gitlab.com/amenimnasri8/Finops-platform.git"
 
 test-backend:
   stage: test
