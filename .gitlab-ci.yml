@@ -6,8 +6,6 @@ stages:
 variables:
   BACKEND_IMAGE: "$CI_REGISTRY_IMAGE/backend"
   FRONTEND_IMAGE: "$CI_REGISTRY_IMAGE/frontend"
-  HELM_RELEASE: finops-platform
-  KUBE_NAMESPACE: finops
 
 test-backend:
   stage: test
@@ -56,13 +54,6 @@ update-helm-values:
   script:
     - git config user.email "ci@gitlab.com"
     - git config user.name "GitLab CI"
-    - sed -i "s|tag:.*# backend-tag|tag: $CI_COMMIT_SHA # backend-tag|" helm/values.yaml
-    - sed -i "s|tag:.*# frontend-tag|tag: $CI_COMMIT_SHA # frontend-tag|" helm/values.yaml
+    - sed -i "s/tag:.*/tag: $CI_COMMIT_SHA/" helm/values.yaml
     - git add helm/values.yaml
-    - git diff --cached --quiet && echo "No changes" || git commit -m "ci: update image tags to $CI_COMMIT_SHA [skip ci]"
-    - git push https://amenimnasri8:$GITLAB_TOKEN@gitlab.com/amenimnasri8/Finops-platform.git HEAD:main
-  needs:
-    - build-backend
-    - build-frontend
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - git diff --cached --quiet && echo "No changes" || git commit -m "ci: updat
