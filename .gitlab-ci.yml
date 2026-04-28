@@ -1,4 +1,4 @@
-﻿stages:
+stages:
   - test
   - build
   - deploy
@@ -11,8 +11,6 @@ variables:
 
 test-backend:
   stage: test
-  tags:
-    - wsl2-local-runner
   script:
     - cd backend
     - pip install --quiet -r requirements.txt
@@ -22,8 +20,6 @@ test-backend:
 
 build-backend:
   stage: build
-  tags:
-    - wsl2-local-runner
   script:
     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - docker build -t "$BACKEND_IMAGE:$CI_COMMIT_SHA" -t "$BACKEND_IMAGE:latest" ./backend
@@ -34,8 +30,6 @@ build-backend:
 
 build-frontend:
   stage: build
-  tags:
-    - wsl2-local-runner
   script:
     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - docker build -t "$FRONTEND_IMAGE:$CI_COMMIT_SHA" -t "$FRONTEND_IMAGE:latest" ./frontend
@@ -46,23 +40,11 @@ build-frontend:
 
 deploy:
   stage: deploy
-  tags:
-    - wsl2-local-runner
   script:
     - export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-    - helm upgrade --install "$HELM_RELEASE" ./helm
-        --namespace "$KUBE_NAMESPACE"
-        --create-namespace
-        --set backend.image="$BACKEND_IMAGE"
-        --set backend.tag="$CI_COMMIT_SHA"
-        --set frontend.image="$FRONTEND_IMAGE"
-        --set frontend.tag="$CI_COMMIT_SHA"
-        --set backend.env.SECRET_KEY="$SECRET_KEY"
-        --set backend.env.JWT_SECRET="$JWT_SECRET"
-        --wait
-        --timeout 5m
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - helm upgrade --install "$HELM_RELEASE" ./helm --namespace "$KUBE_NAMESPACE" --create-namespace --set backend.image="$BACKEND_IMAGE" --set backend.tag="$CI_COMMIT_SHA" --set frontend.image="$FRONTEND_IMAGE" --set frontend.tag="$CI_COMMIT_SHA" --set backend.env.SECRET_KEY="$SECRET_KEY" --set backend.env.JWT_SECRET="$JWT_SECRET" --wait --timeout 5m
   needs:
     - build-backend
     - build-frontend
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
