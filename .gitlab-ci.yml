@@ -51,9 +51,11 @@ build-frontend:
 
 deploy:
   stage: deploy
-  image: alpine/helm:3.15
+  image:
+    name: alpine/helm:3.15
+    entrypoint: [""]
   before_script:
-    - apk add --no-cache curl ca-certificates bash
+    - apk add --no-cache curl ca-certificates
     - curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
     - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
     - mkdir -p ~/.kube
