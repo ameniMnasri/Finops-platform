@@ -1,13 +1,4 @@
-# ── FinOps Platform — GitLab CI/CD Pipeline ───────────────────────────────────
-# Required CI/CD variables (Settings → CI/CD → Variables):
-#   KUBE_CONFIG       base64-encoded kubeconfig for the target cluster
-#   SECRET_KEY        application secret key (min 32 chars)
-#   JWT_SECRET        JWT signing secret (min 32 chars)
-#   POSTGRES_PASSWORD strong postgres password for production
-# Auto-provided by GitLab:
-#   CI_REGISTRY, CI_REGISTRY_USER, CI_REGISTRY_PASSWORD, CI_REGISTRY_IMAGE
-
-stages:
+﻿stages:
   - test
   - build
   - deploy
@@ -20,26 +11,17 @@ variables:
   HELM_RELEASE:       finops-platform
   KUBE_NAMESPACE:     finops
 
-# ── TEST ──────────────────────────────────────────────────────────────────────
 test-backend:
   stage: test
   image: python:3.11
-  cache:
-    key: pip-$CI_COMMIT_REF_SLUG
-    paths:
-      - .pip/
-  variables:
-    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip"
   script:
     - cd backend
     - pip install --quiet -r requirements.txt
-    - pytest tests/ -v --tb=short 2>/dev/null || echo "No tests found — skipping"
+    - pytest tests/ -v --tb=short 2>/dev/null || echo "No tests found - skipping"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
-    - if: '$CI_COMMIT_BRANCH == "develop"'
 
-# ── BUILD ─────────────────────────────────────────────────────────────────────
 build-backend:
   stage: build
   image: docker:24
@@ -48,16 +30,11 @@ build-backend:
   before_script:
     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
-    - |
-      docker build \
-        -t "$BACKEND_IMAGE:$CI_COMMIT_SHA" \
-        -t "$BACKEND_IMAGE:latest" \
-        ./backend
+    - docker build -t "$BACKEND_IMAGE:$CI_COMMIT_SHA" -t "$BACKEND_IMAGE:latest" ./backend
     - docker push "$BACKEND_IMAGE:$CI_COMMIT_SHA"
     - docker push "$BACKEND_IMAGE:latest"
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
-    - if: '$CI_COMMIT_BRANCH == "develop"'
 
 build-frontend:
   stage: build
@@ -67,33 +44,23 @@ build-frontend:
   before_script:
     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
-    - |
-      docker build \
-        -t "$FRONTEND_IMAGE:$CI_COMMIT_SHA" \
-        -t "$FRONTEND_IMAGE:latest" \
-        ./frontend
+    - docker build -t "$FRONTEND_IMAGE:$CI_COMMIT_SHA" -t "$FRONTEND_IMAGE:latest" ./frontend
     - docker push "$FRONTEND_IMAGE:$CI_COMMIT_SHA"
     - docker push "$FRONTEND_IMAGE:latest"
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
-    - if: '$CI_COMMIT_BRANCH == "develop"'
 
-# ── DEPLOY ────────────────────────────────────────────────────────────────────
 deploy:
   stage: deploy
   image: alpine/helm:3.14
   before_script:
-    # Install kubectl
     - apk add --no-cache curl ca-certificates
     - KUBECTL_VERSION=$(curl -sL https://dl.k8s.io/release/stable.txt)
     - curl -sLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
     - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-    - rm kubectl
-    # Configure kubeconfig from CI variable (base64-encoded)
     - mkdir -p ~/.kube
-    - echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+    - echo "$KUBECONFIG_CONTENT" | base64 -d > ~/.kube/config
     - chmod 600 ~/.kube/config
-    # Verify connectivity
     - kubectl get nodes
   script:
     - |
@@ -104,9 +71,8 @@ deploy:
         --set backend.tag="$CI_COMMIT_SHA" \
         --set frontend.image="$FRONTEND_IMAGE" \
         --set frontend.tag="$CI_COMMIT_SHA" \
-        --set secrets.secretKey="$SECRET_KEY" \
-        --set secrets.jwtSecret="$JWT_SECRET" \
-        --set postgres.password="$POSTGRES_PASSWORD" \
+        --set backend.env.SECRET_KEY="$SECRET_KEY" \
+        --set backend.env.JWT_SECRET="$JWT_SECRET" \
         --wait \
         --timeout 5m \
         --atomic
