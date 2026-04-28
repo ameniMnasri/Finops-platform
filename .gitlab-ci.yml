@@ -51,19 +51,13 @@ build-frontend:
 
 deploy:
   stage: deploy
-  image:
-    name: alpine/helm:3.15
-    entrypoint: [""]
+  tags:
+    - wsl2-local-runner
   before_script:
-    - apk add --no-cache curl ca-certificates
-    - curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-    - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-    - mkdir -p ~/.kube
-    - echo "$KUBECONFIG_CONTENT" | base64 -d > ~/.kube/config
-    - chmod 600 ~/.kube/config
+    - export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
     - kubectl get nodes
   script:
-    - helm upgrade --install finops-platform ./helm --namespace finops --create-namespace --set backend.image="$CI_REGISTRY_IMAGE/backend" --set backend.tag="$CI_COMMIT_SHA" --set frontend.image="$CI_REGISTRY_IMAGE/frontend" --set frontend.tag="$CI_COMMIT_SHA" --set secrets.secretKey="$SECRET_KEY" --set secrets.jwtSecret="$JWT_SECRET" --wait --timeout 5m
+    - helm upgrade --install finops-platform ./helm --namespace finops --create-namespace --set backend.image="$BACKEND_IMAGE" --set backend.tag="$CI_COMMIT_SHA" --set frontend.image="$FRONTEND_IMAGE" --set frontend.tag="$CI_COMMIT_SHA" --set secrets.secretKey="$SECRET_KEY" --set secrets.jwtSecret="$JWT_SECRET" --wait --timeout 5m
   needs:
     - build-backend
     - build-frontend
