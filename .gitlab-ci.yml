@@ -1,7 +1,6 @@
 stages:
   - test
   - build
-  - deploy
 
 variables:
   BACKEND_IMAGE: "$CI_REGISTRY_IMAGE/backend"
@@ -44,23 +43,5 @@ build-frontend:
     - docker build -t "$FRONTEND_IMAGE:$CI_COMMIT_SHA" -t "$FRONTEND_IMAGE:latest" ./frontend
     - docker push "$FRONTEND_IMAGE:$CI_COMMIT_SHA"
     - docker push "$FRONTEND_IMAGE:latest"
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
-
-update-helm-values:
-  stage: deploy
-  tags:
-    - wsl2-local-runner
-  script:
-    - git config user.email ci@gitlab.com
-    - git config user.name GitLabCI
-    - sed -i "s/tag:.*/tag: $CI_COMMIT_SHA/" helm/values.yaml
-    - git add helm/values.yaml
-    - git diff --cached --quiet && echo no-changes || git commit -m ci-update-tags
-    - git remote set-url origin $REPO_URL
-    - git push origin HEAD:main
-  needs:
-    - build-backend
-    - build-frontend
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
