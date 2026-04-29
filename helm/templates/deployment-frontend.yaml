@@ -16,6 +16,9 @@ spec:
       labels:
         app: frontend
     spec:
+      imagePullSecrets:
+        - name: {{ index .Values.imagePullSecrets 0 "name" }}
+
       containers:
         - name: frontend
           image: {{ .Values.frontend.image }}:{{ .Values.frontend.tag }}

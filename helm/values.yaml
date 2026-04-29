@@ -59,3 +59,6 @@ ingress:
 secrets:
   secretKey: "change-me-in-production-min-32-chars"
   jwtSecret: "change-me-in-production-min-32-chars"
+
+imagePullSecrets:
+  - name: gitlab-registry
