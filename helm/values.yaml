@@ -51,7 +51,7 @@ postgres:
 ingress:
   enabled: true
   host: finops.local
-  className: nginx
+  className: traefik
 
 # ── Application secrets ───────────────────────────────────────────────────────
 # Override all secrets in production via --set or CI variables.
