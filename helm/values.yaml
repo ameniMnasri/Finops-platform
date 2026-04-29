@@ -3,7 +3,7 @@ namespace: finops
 
 # ── Backend ───────────────────────────────────────────────────────────────────
 backend:
-  image: registry.gitlab.com/your-group/finops-platform/backend
+  image: registry.gitlab.com/amenimnasri8/finops-platform/backend
   tag: latest
   replicas: 1
   port: 8000
@@ -17,7 +17,7 @@ backend:
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
 frontend:
-  image: registry.gitlab.com/your-group/finops-platform/frontend
+  image: registry.gitlab.com/amenimnasri8/finops-platform/frontend
   tag: latest
   replicas: 1
   port: 80
