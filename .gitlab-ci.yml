@@ -45,19 +45,3 @@ build-frontend:
     - docker push "$FRONTEND_IMAGE:latest"
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
-deploy:
-  stage: deploy
-  tags:
-    - wsl2-local-runner
-  script:
-    - export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-    - helm upgrade --install finops-platform ./helm
-        --namespace finops
-        --set backend.tag=$CI_COMMIT_SHA
-        --set frontend.tag=$CI_COMMIT_SHA
-        --wait --timeout 5m
-  needs:
-    - build-backend
-    - build-frontend
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
