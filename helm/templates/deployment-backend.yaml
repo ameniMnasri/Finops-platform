@@ -43,7 +43,7 @@ spec:
                 -h postgres-service.{{ .Values.namespace }}.svc.cluster.local \
                 -p {{ .Values.postgres.port }} \
                 -U {{ .Values.postgres.user }}; do
-                echo "  postgres not ready — retrying in 3s"
+                echo "  postgres not ready - retrying in 3s"
                 sleep 3
               done
               echo "postgres is ready."
