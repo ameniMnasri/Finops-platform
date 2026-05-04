@@ -1,5 +1,6 @@
 stages:
   - test
+  - security
   - build
   - deploy
 
@@ -14,6 +15,39 @@ test-backend:
     - cd backend
     - pip install --quiet -r requirements.txt
     - pytest tests/ -v --tb=short || echo "No tests found"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+sast:
+  stage: security
+  include:
+    - template: Security/SAST.gitlab-ci.yml
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+secret-detection:
+  stage: security
+  include:
+    - template: Security/Secret-Detection.gitlab-ci.yml
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+bandit:
+  stage: security
+  image: python:3.11
+  script:
+    - pip install bandit safety --quiet
+    - echo "=== BANDIT SAST ==="
+    - bandit -r backend/app -ll -ii --format txt || true
+    - echo "=== SAFETY CVE CHECK ==="
+    - safety check -r backend/requirements.txt --output text || true
+  artifacts:
+    reports:
+      sast: bandit-report.json
+    paths:
+      - bandit-report.json
+    expire_in: 1 week
+    when: always
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
 
@@ -46,6 +80,7 @@ build-frontend:
     - docker push "$FRONTEND_IMAGE:latest"
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
+
 deploy:
   stage: deploy
   tags:
