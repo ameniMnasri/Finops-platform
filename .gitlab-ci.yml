@@ -16,6 +16,19 @@ variables:
   FRONTEND_IMAGE: "$CI_REGISTRY_IMAGE/frontend"
   CS_IMAGE: "$CI_REGISTRY_IMAGE/backend:latest"
 
+# Override pour forcer sur GitLab cloud runners
+secret_detection:
+  tags: []
+
+semgrep-sast:
+  tags: []
+
+gemnasium-dependency_scanning:
+  tags: []
+
+container_scanning:
+  tags: []
+
 test-backend:
   stage: test
   image: python:3.11
@@ -44,11 +57,8 @@ trivy-backend:
     name: aquasec/trivy:latest
     entrypoint: [""]
   script:
-    - echo "=== TRIVY Filesystem Scan ==="
     - trivy fs --exit-code 0 --severity HIGH,CRITICAL --no-progress ./backend
-    - echo "=== TRIVY Secret Scan ==="
     - trivy fs --scanners secret --exit-code 0 --no-progress ./backend
-    - echo "=== TRIVY Helm Config Scan ==="
     - trivy fs --scanners config --exit-code 0 --no-progress ./helm
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
