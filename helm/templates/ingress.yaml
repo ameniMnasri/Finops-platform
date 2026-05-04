@@ -7,17 +7,18 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size:      "50m"
-    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
-    nginx.ingress.kubernetes.io/proxy-read-timeout:    "60"
-    nginx.ingress.kubernetes.io/proxy-send-timeout:    "60"
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: \"true\"
 spec:
   ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: finops-tls-secret
   rules:
     - host: {{ .Values.ingress.host }}
       http:
         paths:
-          # /api/ → backend — path forwarded as-is, FastAPI expects /api/v1/...
           - path: /api/
             pathType: Prefix
             backend:
@@ -25,7 +26,6 @@ spec:
                 name: backend-service
                 port:
                   number: {{ .Values.backend.port }}
-          # / → frontend nginx (serves SPA, handles client-side routing)
           - path: /
             pathType: Prefix
             backend:
