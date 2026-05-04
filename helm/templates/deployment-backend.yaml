@@ -19,11 +19,21 @@ spec:
       serviceAccountName: backend-sa
       imagePullSecrets:
         - name: {{ index .Values.imagePullSecrets 0 "name" }}
-      # ── Wait until PostgreSQL is ready before starting the app ────────────
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       initContainers:
         - name: wait-for-postgres
           image: {{ .Values.postgres.image }}
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           command:
             - sh
             - -c
@@ -37,20 +47,24 @@ spec:
                 sleep 3
               done
               echo "postgres is ready."
-
       containers:
         - name: backend
           image: {{ .Values.backend.image }}:{{ .Values.backend.tag }}
           imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: {{ .Values.backend.port }}
               name: http
-
-          # All secrets injected via secretRef — no hardcoded values
           envFrom:
             - secretRef:
                 name: finops-secrets
-
           readinessProbe:
             httpGet:
               path: /
@@ -59,7 +73,6 @@ spec:
             periodSeconds:       10
             timeoutSeconds:       5
             failureThreshold:     3
-
           livenessProbe:
             httpGet:
               path: /
@@ -68,6 +81,5 @@ spec:
             periodSeconds:       15
             timeoutSeconds:       5
             failureThreshold:     3
-
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}

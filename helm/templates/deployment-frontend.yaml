@@ -19,15 +19,37 @@ spec:
       serviceAccountName: frontend-sa
       imagePullSecrets:
         - name: {{ index .Values.imagePullSecrets 0 "name" }}
-
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
       containers:
         - name: frontend
           image: {{ .Values.frontend.image }}:{{ .Values.frontend.tag }}
           imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
           ports:
             - containerPort: {{ .Values.frontend.port }}
               name: http
-
           readinessProbe:
             httpGet:
               path: /
@@ -36,7 +58,6 @@ spec:
             periodSeconds:       10
             timeoutSeconds:       5
             failureThreshold:     3
-
           livenessProbe:
             httpGet:
               path: /
@@ -45,6 +66,5 @@ spec:
             periodSeconds:       15
             timeoutSeconds:       5
             failureThreshold:     3
-
           resources:
             {{- toYaml .Values.frontend.resources | nindent 12 }}
