@@ -123,7 +123,7 @@ deploy:
     - export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
     - kubectl get nodes
   script:
-    - helm upgrade --install finops-platform ./helm --namespace finops --set backend.tag=$CI_COMMIT_SHA --set frontend.tag=$CI_COMMIT_SHA --wait --timeout 5m
+    - helm upgrade --install finops-platform ./helm --namespace finops --set backend.tag=$CI_COMMIT_SHA --set frontend.tag=$CI_COMMIT_SHA --timeout 10m --wait
   needs:
     - build-backend
     - build-frontend
