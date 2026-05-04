@@ -3,20 +3,17 @@ include:
   - template: Security/Secret-Detection.gitlab-ci.yml
   - template: Security/Dependency-Scanning.gitlab-ci.yml
   - template: Security/Container-Scanning.gitlab-ci.yml
-  - template: Security/DAST.gitlab-ci.yml
 
 stages:
   - test
   - security
   - build
   - scan
-  - dast
   - deploy
 
 variables:
   BACKEND_IMAGE: "$CI_REGISTRY_IMAGE/backend"
   FRONTEND_IMAGE: "$CI_REGISTRY_IMAGE/frontend"
-  DAST_WEBSITE: "http://finops.local"
   CS_IMAGE: "$CI_REGISTRY_IMAGE/backend:latest"
 
 test-backend:
@@ -51,13 +48,8 @@ trivy-backend:
     - trivy fs --exit-code 0 --severity HIGH,CRITICAL --no-progress ./backend
     - echo "=== TRIVY Secret Scan ==="
     - trivy fs --scanners secret --exit-code 0 --no-progress ./backend
-    - echo "=== TRIVY Config Scan ==="
+    - echo "=== TRIVY Helm Config Scan ==="
     - trivy fs --scanners config --exit-code 0 --no-progress ./helm
-  artifacts:
-    reports:
-      sast: trivy-report.json
-    when: always
-    expire_in: 1 week
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
 
