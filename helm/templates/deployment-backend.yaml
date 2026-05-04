@@ -16,6 +16,7 @@ spec:
       labels:
         app: backend
     spec:
+      serviceAccountName: backend-sa
       imagePullSecrets:
         - name: {{ index .Values.imagePullSecrets 0 "name" }}
       # ── Wait until PostgreSQL is ready before starting the app ────────────

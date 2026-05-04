@@ -16,6 +16,7 @@ spec:
       labels:
         app: frontend
     spec:
+      serviceAccountName: frontend-sa
       imagePullSecrets:
         - name: {{ index .Values.imagePullSecrets 0 "name" }}
 
